@@ -104,7 +104,7 @@ impl App {
         ];
         let mut d = Settings { device_name: "Домашний ПК".into(), ..Settings::default() };
         state::set_mode(Mode::Local);
-        state::set_hosting(None);
+        state::set_hosting(Vec::new());
         state::set_listen(Listen::On("100.101.102.103:7878".into()));
         state::set_update(UpdateState::UpToDate);
         match n {
@@ -123,9 +123,10 @@ impl App {
             3 => {
                 d.peers = peers;
                 d.target = "Ноутбук".into();
-                state::set_hosting(Some("Ноутбук".into()));
+                state::set_hosting(vec!["Ноутбук".into(), "Коллега".into()]);
                 state::set_update(UpdateState::Available("0.2.1".into()));
-                state::log("«Ноутбук» управляет этим компьютером");
+                state::log("«Ноутбук» подключился");
+                state::log("«Коллега» подключился");
             }
             _ => {
                 d.peers = peers;
@@ -199,7 +200,7 @@ impl App {
 
     fn update_banner(&mut self, ui: &mut egui::Ui) {
         let UpdateState::Available(v) = self.snap.update.clone() else { return };
-        let busy = self.snap.mode != Mode::Local || self.snap.hosting.is_some();
+        let busy = self.snap.mode != Mode::Local || !self.snap.hosting.is_empty();
         egui::Frame::new()
             .fill(Color32::from_rgb(0x2a, 0x22, 0x10))
             .stroke(Stroke::new(1.0, AMBER))
@@ -231,15 +232,15 @@ impl App {
                     "Клавиатура и мышь сейчас управляют тем компьютером.".into(),
                 ),
                 (Mode::Connecting(p), _) => (AMBER, format!("Подключаюсь к «{p}»…"), "Подождите пару секунд.".into()),
-                (Mode::Local, Some(who)) => (
+                (Mode::Local, who) if !who.is_empty() => (
                     AMBER,
-                    format!("«{who}» управляет этим компьютером"),
-                    "Если начать работать за ним, чужой ввод временно игнорируется.".into(),
+                    format!("Подключены: {}", who.iter().map(|n| format!("«{n}»")).collect::<Vec<_>>().join(", ")),
+                    "Вы и они можете пользоваться этим компьютером одновременно.".into(),
                 ),
-                (Mode::Local, None) if target.is_some() => {
+                (Mode::Local, _) if target.is_some() => {
                     (ACCENT, "Ввод на этом компьютере".into(), "Нажмите кнопку или горячую клавишу, чтобы переключиться.".into())
                 }
-                (Mode::Local, None) => (
+                (Mode::Local, _) => (
                     MUTED,
                     "Добавьте компьютер".into(),
                     "Укажите ниже, на какой компьютер переключать ввод.".into(),
@@ -261,9 +262,7 @@ impl App {
                     Self::big_button(ui, "Подключаюсь…", Color32::from_rgb(0x3a, 0x40, 0x52), false);
                 }
                 (Mode::Local, Some(t)) => {
-                    let can = snap.hosting.is_none();
-                    let label = if can { format!("Переключить на «{t}»") } else { "Недоступно, пока вами управляют".to_string() };
-                    if Self::big_button(ui, &label, if can { ACCENT } else { Color32::from_rgb(0x3a, 0x40, 0x52) }, can) {
+                    if Self::big_button(ui, &format!("Переключить на «{t}»"), ACCENT, true) {
                         self.engine.toggle();
                     }
                 }
@@ -413,19 +412,13 @@ impl App {
                         *dirty = true;
                     }
                 });
-                ui.horizontal(|ui| {
-                    ui.label("Пауза после вашего ввода, мс");
-                    if ui.add(egui::DragValue::new(&mut self.draft.grace_ms).range(0..=10_000).speed(50)).changed() {
-                        *dirty = true;
-                    }
-                });
             });
         });
     }
 
     fn app_card(&mut self, ui: &mut egui::Ui, dirty: &mut bool) {
         let update = self.snap.update.clone();
-        let busy = self.snap.mode != Mode::Local || self.snap.hosting.is_some();
+        let busy = self.snap.mode != Mode::Local || !self.snap.hosting.is_empty();
         Self::card(ui, "Программа", |ui| {
             if ui.checkbox(&mut self.draft.autostart, "Запускать при входе в Windows").changed() {
                 *dirty = true;

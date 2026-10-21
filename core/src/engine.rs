@@ -81,7 +81,7 @@ fn sync_listener() {
 
 fn idle() -> bool {
     let s = state::snapshot();
-    s.mode == Mode::Local && s.hosting.is_none()
+    s.mode == Mode::Local && s.hosting.is_empty()
 }
 
 pub struct Engine;
@@ -90,7 +90,6 @@ impl Engine {
     pub fn start(settings: Settings, no_auto_update: bool) -> Engine {
         state::set_log_file(settings::config_dir().join("switchdesk.log"));
         NO_AUTO_UPDATE.store(no_auto_update, Ordering::Relaxed);
-        platform::set_grace(settings.grace_ms);
         let autostart = settings.autostart;
         *SETTINGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(settings);
         state::log(format!("Switchdesk {} запущен", switchdesk_update::CURRENT));
@@ -132,7 +131,6 @@ impl Engine {
             return Ok(());
         }
         *SETTINGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(new.clone());
-        platform::set_grace(new.grace_ms);
         if new.autostart != old.autostart && !switchdesk_win::autostart::set(new.autostart, &exe_command()) {
             state::log("Не удалось изменить автозапуск");
         }

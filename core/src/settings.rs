@@ -30,8 +30,6 @@ pub struct Settings {
     pub port: u16,
     pub autostart: bool,
     pub auto_update: bool,
-    /// Пауза удалённого ввода после физического ввода за этим компьютером.
-    pub grace_ms: u64,
 }
 
 impl Default for Settings {
@@ -45,7 +43,6 @@ impl Default for Settings {
             port: DEFAULT_PORT,
             autostart: true,
             auto_update: true,
-            grace_ms: 1500,
         }
     }
 }

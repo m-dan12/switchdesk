@@ -102,7 +102,7 @@ fn run(engine: Engine) {
         if gen != shown_gen {
             shown_gen = gen;
             let snap = state::snapshot();
-            let s = icon_state(&snap.mode, snap.hosting.is_some());
+            let s = icon_state(&snap.mode, !snap.hosting.is_empty());
             if shown_icon != Some(s) {
                 shown_icon = Some(s);
                 let _ = tray.set_icon(Some(make_icon(s)));
@@ -111,9 +111,12 @@ fn run(engine: Engine) {
             let (label, enabled, tip) = match (&snap.mode, &snap.hosting, &target) {
                 (Mode::Remote(p), _, _) => ("Вернуться на этот компьютер".to_string(), true, format!("Switchdesk — ввод на «{p}»")),
                 (Mode::Connecting(p), _, _) => ("Подключаюсь…".to_string(), false, format!("Switchdesk — подключаюсь к «{p}»")),
-                (_, Some(who), _) => ("Переключить ввод".to_string(), false, format!("Switchdesk — управляет «{who}»")),
-                (_, None, Some(t)) => (format!("Переключить на «{t}»"), true, "Switchdesk — ввод на этом компьютере".to_string()),
-                (_, None, None) => ("Нет компьютера для переключения".to_string(), false, "Switchdesk".to_string()),
+                (_, who, Some(t)) => (
+                    format!("Переключить на «{t}»"),
+                    true,
+                    if who.is_empty() { "Switchdesk — ввод на этом компьютере".to_string() } else { format!("Switchdesk — подключено: {}", who.join(", ")) },
+                ),
+                (_, _, None) => ("Нет компьютера для переключения".to_string(), false, "Switchdesk".to_string()),
             };
             toggle.set_text(label);
             toggle.set_enabled(enabled);

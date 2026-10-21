@@ -5,13 +5,12 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use switchdesk_proto::{read_msg, write_msg, ClientMsg, HostMsg, MAX_CLIPBOARD_BYTES, VERSION};
+use switchdesk_proto::{read_msg, write_msg, Button, ClientMsg, HostMsg, MAX_CLIPBOARD_BYTES, VERSION};
 use switchdesk_win::{clipboard, inject};
 
-use super::held::{Decision, HeldState};
-use super::session::{Backend, Manager, Peer};
+use super::session::{Backend, Manager, Peer, Session};
 use crate::{engine, platform, state};
 
 const MAX_CONNECTIONS: usize = 16;
@@ -19,55 +18,42 @@ const MAX_CONNECTIONS: usize = 16;
 static MANAGER: OnceLock<Arc<Manager<HostBackend>>> = OnceLock::new();
 
 pub fn manager() -> &'static Arc<Manager<HostBackend>> {
-    MANAGER.get_or_init(|| Arc::new(Manager::new(HostBackend::default())))
+    MANAGER.get_or_init(|| Arc::new(Manager::new(HostBackend)))
 }
 
 // ───────────────────────── backend ─────────────────────────
 
-#[derive(Default)]
-pub struct HostBackend {
-    held: Mutex<HeldState>,
-}
+pub struct HostBackend;
 
 impl HostBackend {
-    pub fn inject(&self, msg: &ClientMsg) -> Decision {
-        let decision = self.held.lock().unwrap().decide(msg, platform::local_recent());
-        if decision == Decision::Inject {
-            match *msg {
-                ClientMsg::MouseMove { dx, dy } => inject::mouse_move(dx, dy),
-                ClientMsg::MouseButton { button, down } => inject::mouse_button(button, down),
-                ClientMsg::Wheel { delta, horizontal } => inject::wheel(delta, horizontal),
-                ClientMsg::Key { scan, extended, up } => inject::key(scan, extended, up),
-                _ => {}
-            }
-        }
-        decision
-    }
-
     pub fn set_clipboard(&self, text: &str) {
         if text.len() > MAX_CLIPBOARD_BYTES {
             return;
         }
         *platform::CLIP_LAST.lock().unwrap() = text.to_owned();
-        // private = true: не оседает в истории буфера (Win+V) этого компьютера
+        // private = true: не оседает в истории буфера (Win+V)
         clipboard::set_text(text, true);
     }
 }
 
 impl Backend for HostBackend {
-    fn release_all(&self) {
-        let (keys, buttons) = self.held.lock().unwrap().drain();
-        for (scan, extended) in keys {
-            inject::key(scan, extended, true);
-        }
-        for b in buttons {
-            inject::mouse_button(b, false);
+    fn apply(&self, msg: &ClientMsg) {
+        match *msg {
+            ClientMsg::MouseMove { dx, dy } => inject::mouse_move(dx, dy),
+            ClientMsg::MouseButton { button, down } => inject::mouse_button(button, down),
+            ClientMsg::Wheel { delta, horizontal } => inject::wheel(delta, horizontal),
+            ClientMsg::Key { scan, extended, up } => inject::key(scan, extended, up),
+            _ => {}
         }
     }
 
-    fn clear_clipboard(&self) {
-        platform::CLIP_LAST.lock().unwrap().clear();
-        clipboard::clear();
+    fn release(&self, keys: &[(u16, bool)], buttons: &[Button]) {
+        for &(scan, extended) in keys {
+            inject::key(scan, extended, true);
+        }
+        for &b in buttons {
+            inject::mouse_button(b, false);
+        }
     }
 }
 
@@ -118,55 +104,33 @@ fn serve(stream: TcpStream, mgr: &Manager<HostBackend>) -> io::Result<()> {
         peer.send(&HostMsg::Rejected { reason: format!("версия протокола {version}, нужна {VERSION}") });
         return Ok(());
     }
-    if platform::is_remote() {
-        peer.send(&HostMsg::Rejected { reason: "этот компьютер сейчас сам управляет другим".into() });
-        return Ok(());
-    }
     peer.send(&HostMsg::Welcome { version: VERSION, host_name: engine::current_settings().device_name });
 
     // клиент шлёт Ping раз в секунду; тишина дольше 10 с = обрыв
     reader.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let id = mgr.activate(name, peer.clone());
-    state::set_hosting(mgr.active_name());
-    let result = session_loop(&mut reader, mgr, &peer, id);
-    mgr.release(id);
-    state::set_hosting(mgr.active_name());
+    let session = mgr.add(name, peer.clone());
+    state::log(format!("«{}» подключился", session.name));
+    state::set_hosting(mgr.names());
+    let result = session_loop(&mut reader, mgr, &peer, &session);
+    mgr.remove(&session);
+    state::log(format!("«{}» отключился", session.name));
+    state::set_hosting(mgr.names());
     peer.close();
     result
 }
 
-fn session_loop(
-    reader: &mut TcpStream,
-    mgr: &Manager<HostBackend>,
-    peer: &TcpPeer,
-    id: u64,
-) -> io::Result<()> {
-    let mut last_notice = Instant::now() - Duration::from_secs(60);
+fn session_loop(reader: &mut TcpStream, mgr: &Manager<HostBackend>, peer: &TcpPeer, s: &Session) -> io::Result<()> {
     loop {
-        let msg: ClientMsg = read_msg(reader)?;
-        match msg {
+        match read_msg::<ClientMsg, _>(reader)? {
             ClientMsg::Ping(n) => peer.send(&HostMsg::Pong(n)),
             ClientMsg::Hello { .. } => return Err(invalid("повторный Hello")),
             ClientMsg::Clipboard(text) => {
-                if mgr.run_if_active(id, |b| b.set_clipboard(&text)).is_none() {
-                    return Ok(()); // вытеснены
-                }
+                mgr.backend().set_clipboard(&text);
+                // остальные подключённые тоже должны получить этот текст
+                mgr.send_to_others(Some(s.id), &HostMsg::Clipboard(text));
             }
-            ClientMsg::ReleaseAll => {
-                if mgr.run_if_active(id, |b| b.release_all()).is_none() {
-                    return Ok(());
-                }
-            }
-            input => match mgr.run_if_active(id, |b| b.inject(&input)) {
-                None => return Ok(()), // вытеснены
-                Some(Decision::Suppressed) => {
-                    if last_notice.elapsed() >= Duration::from_secs(2) {
-                        last_notice = Instant::now();
-                        peer.send(&HostMsg::LocalActivity);
-                    }
-                }
-                Some(_) => {}
-            },
+            ClientMsg::ReleaseAll => mgr.release_held(s),
+            input => mgr.input(s, &input),
         }
     }
 }

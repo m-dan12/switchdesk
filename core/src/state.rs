@@ -36,8 +36,8 @@ pub enum UpdateState {
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub mode: Mode,
-    /// Имя того, кто сейчас управляет этим компьютером.
-    pub hosting: Option<String>,
+    /// Имена тех, кто сейчас подключён к этому компьютеру.
+    pub hosting: Vec<String>,
     pub listen: Listen,
     pub update: UpdateState,
     pub logs: Vec<String>,
@@ -59,7 +59,7 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let st = g.get_or_insert_with(|| State {
         snap: Snapshot {
             mode: Mode::Local,
-            hosting: None,
+            hosting: Vec::new(),
             listen: Listen::Off,
             update: UpdateState::Unknown,
             logs: Vec::new(),
@@ -119,7 +119,7 @@ fn set<T: PartialEq>(slot: impl FnOnce(&mut Snapshot) -> &mut T, v: T) {
 pub fn set_mode(m: Mode) {
     set(|s| &mut s.mode, m);
 }
-pub fn set_hosting(h: Option<String>) {
+pub fn set_hosting(h: Vec<String>) {
     set(|s| &mut s.hosting, h);
 }
 pub fn set_listen(l: Listen) {

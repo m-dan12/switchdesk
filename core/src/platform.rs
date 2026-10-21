@@ -7,13 +7,13 @@
 
 use std::mem::size_of;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use switchdesk_proto::{Button, ClientMsg, HostMsg};
-use switchdesk_win::{clipboard, inject, tick_ms, window};
+use switchdesk_win::{clipboard, inject, window};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::DataExchange::AddClipboardFormatListener;
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
@@ -69,9 +69,6 @@ static SUPPRESS_UP_VK: AtomicU32 = AtomicU32::new(0);
 static TX: OnceLock<Sender<Event>> = OnceLock::new();
 /// Последний синхронизированный текст — защита от эха.
 pub(crate) static CLIP_LAST: Mutex<String> = Mutex::new(String::new());
-/// Момент (tick_ms) последнего физического ввода на этом компьютере; 0 — не было.
-static LAST_LOCAL_MS: AtomicU64 = AtomicU64::new(0);
-static GRACE_MS: AtomicU64 = AtomicU64::new(1500);
 
 fn send(ev: Event) {
     if let Some(tx) = TX.get() {
@@ -81,26 +78,6 @@ fn send(ev: Event) {
 
 pub fn set_sender(tx: Sender<Event>) {
     let _ = TX.set(tx);
-}
-
-pub fn set_grace(ms: u64) {
-    GRACE_MS.store(ms, Relaxed);
-}
-
-/// Работал ли кто-то за этим компьютером физически совсем недавно.
-pub fn local_recent() -> bool {
-    let grace = GRACE_MS.load(Relaxed);
-    let last = LAST_LOCAL_MS.load(Relaxed);
-    grace > 0 && last != 0 && tick_ms().saturating_sub(last) < grace
-}
-
-fn mark_local() {
-    LAST_LOCAL_MS.store(tick_ms(), Relaxed);
-}
-
-/// true — ваш ввод сейчас уходит на другой компьютер.
-pub fn is_remote() -> bool {
-    REMOTE.load(Relaxed)
 }
 
 // ───────────────── вызывается сетевым потоком ─────────────────
@@ -180,7 +157,6 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         let k = &*(lparam as *const KBDLLHOOKSTRUCT);
         // Собственные синтетические события (сброс модификаторов) пропускаем как есть.
         if k.flags & LLKHF_INJECTED == 0 {
-            mark_local();
             let up = k.flags & LLKHF_UP != 0;
             update_mods(k.vkCode, !up);
 
@@ -218,7 +194,6 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     if code == HC_ACTION as i32 {
         let m = &*(lparam as *const MSLLHOOKSTRUCT);
         if m.flags & LLMHF_INJECTED == 0 {
-            mark_local();
             if !REMOTE.load(Relaxed) {
                 return CallNextHookEx(ptr::null_mut(), code, wparam, lparam);
             }
@@ -332,12 +307,8 @@ unsafe extern "system" fn input_wnd_proc(
 fn on_clipboard_changed() {
     let remote = REMOTE.load(Relaxed);
     let mgr = host_net::manager();
-    let hosting = !remote && mgr.has_active();
+    let hosting = mgr.has_active();
     if !(remote || hosting) || clipboard::is_excluded() {
-        return;
-    }
-    // Если за этим компьютером физически работают, его копирование не уходит удалённому пользователю.
-    if hosting && local_recent() {
         return;
     }
     let Some(text) = clipboard::get_text() else { return };
@@ -349,9 +320,10 @@ fn on_clipboard_changed() {
         *last = text.clone();
     }
     if remote {
-        send(Event::Clip(text));
-    } else {
-        mgr.send_active(&HostMsg::Clipboard(text));
+        send(Event::Clip(text.clone()));
+    }
+    if hosting {
+        mgr.send_to_others(None, &HostMsg::Clipboard(text));
     }
 }
 

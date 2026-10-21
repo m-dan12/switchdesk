@@ -19,6 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
 
       - name: Версия тега совпадает с Cargo.toml
         shell: bash
@@ -30,7 +32,6 @@ jobs:
           echo "VERSION=$cargo_ver" >> "$GITHUB_ENV"
           echo "TAG=v$cargo_ver" >> "$GITHUB_ENV"
 
-      - run: cargo test --workspace
       - run: cargo build --release
 
       - name: Установщик

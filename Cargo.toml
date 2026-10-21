@@ -3,7 +3,7 @@ resolver = "2"
 members = ["proto", "winutil", "core", "update", "app", "tools/sign"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 
@@ -20,7 +20,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(switchdesk_check)'] }
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 8
 panic = "abort"
 strip = true

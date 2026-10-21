@@ -1,19 +1,22 @@
-//! Менеджер сессий: на хосте активен не более одного клиента.
-//! Новый клиент вытесняет предыдущего. Не зависит от ОС — покрыт тестами.
+//! Менеджер сессий: к компьютеру может быть подключено сколько угодно клиентов сразу,
+//! все пользуются им совместно. У каждой сессии свой учёт зажатого, поэтому при отключении
+//! отпускается только то, что держал именно этот клиент. Не зависит от ОС — покрыт тестами.
 
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
 
-use switchdesk_proto::HostMsg;
+use switchdesk_proto::{Button, ClientMsg, HostMsg};
 
-/// Побочные эффекты на хосте.
+use super::held::{Decision, HeldState};
+
+/// Побочные эффекты на принимающем компьютере.
 pub trait Backend: Send + Sync {
-    /// Отпустить все зажатые клавиши и кнопки.
-    fn release_all(&self);
-    /// Очистить буфер обмена (чтобы следующий пользователь не увидел чужое).
-    fn clear_clipboard(&self);
+    /// Внедрить событие ввода.
+    fn apply(&self, msg: &ClientMsg);
+    /// Отпустить клавиши и кнопки.
+    fn release(&self, keys: &[(u16, bool)], buttons: &[Button]);
 }
 
 /// Канал связи с клиентом.
@@ -22,86 +25,90 @@ pub trait Peer: Send + Sync {
     fn close(&self);
 }
 
-struct Active {
-    id: u64,
-    name: String,
+pub struct Session {
+    pub id: u64,
+    pub name: String,
     peer: Arc<dyn Peer>,
+    held: Mutex<HeldState>,
 }
 
 pub struct Manager<B: Backend> {
     backend: B,
-    active: Mutex<Option<Active>>,
+    sessions: Mutex<Vec<Arc<Session>>>,
     next_id: AtomicU64,
 }
 
 impl<B: Backend> Manager<B> {
     pub fn new(backend: B) -> Self {
-        Self { backend, active: Mutex::new(None), next_id: AtomicU64::new(1) }
+        Self { backend, sessions: Mutex::new(Vec::new()), next_id: AtomicU64::new(1) }
     }
 
-    /// Делает клиента активным. Предыдущий получает `Kicked`, соединение с ним
-    /// закрывается, а хост приводится в чистое состояние — всё под одним замком,
-    /// поэтому новый клиент не успевает ничего внедрить до очистки.
-    pub fn activate(&self, name: String, peer: Arc<dyn Peer>) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut guard = self.active.lock().unwrap();
-        if let Some(old) = guard.take() {
-            crate::state::log(format!("«{}» вытеснен: управление взял «{}»", old.name, name));
-            old.peer.send(&HostMsg::Kicked { by: name.clone() });
-            old.peer.close();
-            self.backend.release_all();
-            self.backend.clear_clipboard();
-        }
-        crate::state::log(format!("«{}» управляет этим компьютером", name));
-        *guard = Some(Active { id, name, peer });
-        id
+    pub fn backend(&self) -> &B {
+        &self.backend
     }
 
-    /// Завершает сессию, если она всё ещё активна (после кика — ничего не делает).
-    pub fn release(&self, id: u64) {
-        let mut guard = self.active.lock().unwrap();
-        if guard.as_ref().map(|a| a.id) == Some(id) {
-            let old = guard.take().unwrap();
-            crate::state::log(format!("«{}» отключился", old.name));
-            self.backend.release_all();
-            self.backend.clear_clipboard();
-        }
+    pub fn add(&self, name: String, peer: Arc<dyn Peer>) -> Arc<Session> {
+        let s = Arc::new(Session {
+            id: self.next_id.fetch_add(1, Ordering::Relaxed),
+            name,
+            peer,
+            held: Mutex::new(HeldState::default()),
+        });
+        self.sessions.lock().unwrap().push(s.clone());
+        s
     }
 
-    /// Выполняет `f`, только если сессия `id` активна; замок удерживается на время вызова,
-    /// поэтому внедрение ввода не пересекается с киком и очисткой.
-    pub fn run_if_active<R>(&self, id: u64, f: impl FnOnce(&B) -> R) -> Option<R> {
-        let guard = self.active.lock().unwrap();
-        match guard.as_ref() {
-            Some(a) if a.id == id => Some(f(&self.backend)),
-            _ => None,
+    /// Убирает сессию и отпускает то, что она держала.
+    pub fn remove(&self, s: &Session) {
+        self.sessions.lock().unwrap().retain(|x| x.id != s.id);
+        self.release_held(s);
+    }
+
+    /// Внедряет событие этой сессии. Замок менеджера при этом не удерживается:
+    /// сессии не мешают друг другу.
+    pub fn input(&self, s: &Session, msg: &ClientMsg) {
+        let decision = s.held.lock().unwrap().decide(msg);
+        if decision == Decision::Inject {
+            self.backend.apply(msg);
         }
     }
 
-    /// Отправляет сообщение активному клиенту, если он есть.
-    pub fn send_active(&self, msg: &HostMsg) {
-        let peer = self.active.lock().unwrap().as_ref().map(|a| a.peer.clone());
-        if let Some(p) = peer {
-            p.send(msg);
+    /// Отпускает всё, что держит сессия (клиент сам попросил или отключился).
+    pub fn release_held(&self, s: &Session) {
+        let (keys, buttons) = s.held.lock().unwrap().drain();
+        if !keys.is_empty() || !buttons.is_empty() {
+            self.backend.release(&keys, &buttons);
+        }
+    }
+
+    fn snapshot(&self) -> Vec<Arc<Session>> {
+        self.sessions.lock().unwrap().clone()
+    }
+
+    /// Отправляет сообщение всем, кроме `except` (если задан).
+    pub fn send_to_others(&self, except: Option<u64>, msg: &HostMsg) {
+        for s in self.snapshot() {
+            if Some(s.id) != except {
+                s.peer.send(msg);
+            }
         }
     }
 
     pub fn has_active(&self) -> bool {
-        self.active.lock().unwrap().is_some()
+        !self.sessions.lock().unwrap().is_empty()
     }
 
-    /// Имя того, кто сейчас управляет этим компьютером.
-    pub fn active_name(&self) -> Option<String> {
-        self.active.lock().unwrap().as_ref().map(|a| a.name.clone())
+    /// Имена тех, кто сейчас подключён, по порядку подключения.
+    pub fn names(&self) -> Vec<String> {
+        self.sessions.lock().unwrap().iter().map(|s| s.name.clone()).collect()
     }
 
-    /// Закрывает активную сессию (если есть) и приводит хост в чистое состояние.
+    /// Закрывает все сессии и отпускает всё зажатое.
     pub fn reset(&self) {
-        let old = self.active.lock().unwrap().take();
-        if let Some(old) = old {
-            old.peer.close();
+        for s in std::mem::take(&mut *self.sessions.lock().unwrap()) {
+            s.peer.close();
+            self.release_held(&s);
         }
-        self.backend.release_all();
     }
 }
 
@@ -110,17 +117,19 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
+    type Released = (Vec<(u16, bool)>, Vec<Button>);
+
     #[derive(Default)]
     struct MockBackend {
-        releases: AtomicUsize,
-        clears: AtomicUsize,
+        applied: Mutex<Vec<ClientMsg>>,
+        released: Mutex<Vec<Released>>,
     }
     impl Backend for Arc<MockBackend> {
-        fn release_all(&self) {
-            self.releases.fetch_add(1, Ordering::SeqCst);
+        fn apply(&self, msg: &ClientMsg) {
+            self.applied.lock().unwrap().push(msg.clone());
         }
-        fn clear_clipboard(&self) {
-            self.clears.fetch_add(1, Ordering::SeqCst);
+        fn release(&self, keys: &[(u16, bool)], buttons: &[Button]) {
+            self.released.lock().unwrap().push((keys.to_vec(), buttons.to_vec()));
         }
     }
 
@@ -143,58 +152,76 @@ mod tests {
         (Manager::new(b.clone()), b)
     }
 
-    #[test]
-    fn second_client_kicks_first_and_cleans_host() {
-        let (m, b) = setup();
-        let p1 = Arc::new(MockPeer::default());
-        let p2 = Arc::new(MockPeer::default());
-        let id1 = m.activate("Даниил".into(), p1.clone());
-        let id2 = m.activate("Коллега".into(), p2.clone());
-
-        assert_eq!(p1.sent.lock().unwrap().as_slice(), &[HostMsg::Kicked { by: "Коллега".into() }]);
-        assert_eq!(p1.closed.load(Ordering::SeqCst), 1);
-        assert!(p2.sent.lock().unwrap().is_empty());
-        assert_eq!(b.releases.load(Ordering::SeqCst), 1);
-        assert_eq!(b.clears.load(Ordering::SeqCst), 1);
-
-        assert!(m.run_if_active(id1, |_| ()).is_none(), "вытесненный не должен вводить");
-        assert!(m.run_if_active(id2, |_| ()).is_some());
+    fn key(scan: u16, up: bool) -> ClientMsg {
+        ClientMsg::Key { scan, extended: false, up }
     }
 
     #[test]
-    fn late_release_of_kicked_session_is_noop() {
+    fn several_clients_work_at_once_without_kicking() {
         let (m, b) = setup();
-        let id1 = m.activate("A".into(), Arc::new(MockPeer::default()));
-        let _id2 = m.activate("B".into(), Arc::new(MockPeer::default()));
-        m.release(id1);
-        // чистка была ровно одна — при кике; позднее release старого id её не повторяет
-        assert_eq!(b.releases.load(Ordering::SeqCst), 1);
-        assert_eq!(b.clears.load(Ordering::SeqCst), 1);
-        assert!(m.has_active());
+        let (p1, p2) = (Arc::new(MockPeer::default()), Arc::new(MockPeer::default()));
+        let s1 = m.add("Даниил".into(), p1.clone());
+        let s2 = m.add("Коллега".into(), p2.clone());
+
+        assert_eq!(m.names(), vec!["Даниил".to_string(), "Коллега".to_string()]);
+        assert!(p1.sent.lock().unwrap().is_empty() && p2.sent.lock().unwrap().is_empty());
+        assert_eq!(p1.closed.load(Ordering::SeqCst), 0);
+
+        m.input(&s1, &ClientMsg::MouseMove { dx: 1, dy: 2 });
+        m.input(&s2, &key(0x1E, false));
+        assert_eq!(b.applied.lock().unwrap().len(), 2, "ввод обоих проходит");
     }
 
     #[test]
-    fn release_active_cleans_and_frees_host() {
+    fn disconnect_releases_only_own_keys() {
         let (m, b) = setup();
-        let id = m.activate("A".into(), Arc::new(MockPeer::default()));
-        m.release(id);
-        assert!(!m.has_active());
-        assert_eq!(b.releases.load(Ordering::SeqCst), 1);
-        assert_eq!(b.clears.load(Ordering::SeqCst), 1);
-        // повторный release безвреден
-        m.release(id);
-        assert_eq!(b.releases.load(Ordering::SeqCst), 1);
+        let s1 = m.add("A".into(), Arc::new(MockPeer::default()));
+        let s2 = m.add("B".into(), Arc::new(MockPeer::default()));
+        m.input(&s1, &key(0x1D, false)); // Ctrl у A
+        m.input(&s2, &key(0x2A, false)); // Shift у B
+
+        m.remove(&s1);
+        let rel = b.released.lock().unwrap().clone();
+        assert_eq!(rel, vec![(vec![(0x1D, false)], vec![])], "отпущен только Ctrl от A");
+        assert_eq!(m.names(), vec!["B".to_string()]);
+
+        // повторное удаление ничего не отпускает второй раз
+        m.remove(&s1);
+        assert_eq!(b.released.lock().unwrap().len(), 1);
     }
 
     #[test]
-    fn send_active_reaches_only_current_peer() {
+    fn release_up_for_unpressed_key_is_not_injected() {
+        let (m, b) = setup();
+        let s = m.add("A".into(), Arc::new(MockPeer::default()));
+        m.input(&s, &key(0x1D, true));
+        assert!(b.applied.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn broadcast_skips_the_sender() {
         let (m, _b) = setup();
-        let p1 = Arc::new(MockPeer::default());
-        let p2 = Arc::new(MockPeer::default());
-        m.activate("A".into(), p1.clone());
-        m.activate("B".into(), p2.clone());
-        m.send_active(&HostMsg::Clipboard("x".into()));
-        assert_eq!(p1.sent.lock().unwrap().len(), 1, "только Kicked");
-        assert_eq!(p2.sent.lock().unwrap().as_slice(), &[HostMsg::Clipboard("x".into())]);
+        let (p1, p2, p3) = (Arc::new(MockPeer::default()), Arc::new(MockPeer::default()), Arc::new(MockPeer::default()));
+        let s1 = m.add("A".into(), p1.clone());
+        m.add("B".into(), p2.clone());
+        m.add("C".into(), p3.clone());
+        m.send_to_others(Some(s1.id), &HostMsg::Clipboard("x".into()));
+        assert!(p1.sent.lock().unwrap().is_empty());
+        assert_eq!(p2.sent.lock().unwrap().len(), 1);
+        assert_eq!(p3.sent.lock().unwrap().len(), 1);
+        m.send_to_others(None, &HostMsg::Clipboard("y".into()));
+        assert_eq!(p1.sent.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reset_closes_everyone_and_releases_everything() {
+        let (m, b) = setup();
+        let p = Arc::new(MockPeer::default());
+        let s = m.add("A".into(), p.clone());
+        m.input(&s, &key(0x1D, false));
+        m.reset();
+        assert!(!m.has_active());
+        assert_eq!(p.closed.load(Ordering::SeqCst), 1);
+        assert_eq!(b.released.lock().unwrap().len(), 1);
     }
 }

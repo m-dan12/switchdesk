@@ -11,7 +11,7 @@ use switchdesk_proto::{coalesce, encode_frame, read_msg, write_msg, ClientMsg, H
 use crate::platform::{self as win, Beep};
 use crate::settings::Settings;
 use crate::state::{self, Mode};
-use crate::{engine, host};
+use crate::engine;
 
 pub enum Event {
     /// Ввод с хуков (только в режиме «удалённо»).
@@ -199,11 +199,6 @@ fn enter(conn: &mut Option<Conn>, next_id: &mut u64, pending: &mut Vec<ClientMsg
         win::beep(Beep::Error);
         return;
     };
-    if host::net::manager().has_active() {
-        state::log("Этим компьютером сейчас управляют — переключиться нельзя");
-        win::beep(Beep::Error);
-        return;
-    }
     state::set_mode(Mode::Connecting(peer.name.clone()));
     match connect(&peer.addr, &settings.device_name, *next_id, tx) {
         Ok(c) => {
