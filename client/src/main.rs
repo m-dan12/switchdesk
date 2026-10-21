@@ -29,16 +29,16 @@ pub fn die(msg: &str) -> ! {
     std::process::exit(2);
 }
 
-fn parse_args() -> Config {
+fn parse_args(args: Vec<String>) -> Config {
     let mut host = None;
     let mut name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "client".into());
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--host" => host = Some(args.next().unwrap_or_else(|| die("--host требует значение"))),
             "--name" => name = args.next().unwrap_or_else(|| die("--name требует значение")),
             "-h" | "--help" => {
-                println!("{USAGE}");
+                println!("{USAGE}\n\n{}", switchdesk_update::cli::USAGE);
                 std::process::exit(0);
             }
             other => die(&format!("неизвестный аргумент: {other}\n\n{USAGE}")),
@@ -49,7 +49,13 @@ fn parse_args() -> Config {
 }
 
 fn main() {
-    let cfg = parse_args();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let upd = switchdesk_update::cli::take_flags(&mut args);
+    if upd.is_command() {
+        switchdesk_update::cli::run("switchdesk-client", &upd, &args);
+    }
+    let cfg = parse_args(args.clone());
+    switchdesk_update::cli::run("switchdesk-client", &upd, &args);
     #[cfg(any(windows, switchdesk_check))]
     win::run(cfg);
     #[cfg(not(any(windows, switchdesk_check)))]

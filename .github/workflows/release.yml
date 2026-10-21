@@ -1,0 +1,65 @@
+name: Release
+
+# Выпуск: поднять версию в Cargo.toml ([workspace.package]), закоммитить и поставить тег vX.Y.Z.
+# Нужен секрет репозитория UPDATE_SIGNING_KEY (hex-ключ ed25519, пара к PUBLIC_KEY_HEX в update/src/lib.rs).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Версия тега совпадает с Cargo.toml
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          echo "tag=$tag cargo=$cargo_ver"
+          [ "$tag" = "$cargo_ver" ] || { echo "::error::тег $GITHUB_REF_NAME не совпадает с версией $cargo_ver"; exit 1; }
+          echo "VERSION=$tag" >> "$GITHUB_ENV"
+
+      - run: cargo test --workspace
+      - run: cargo build --release
+
+      - name: Установщик
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:VERSION" installer\switchdesk.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Подпись
+        shell: bash
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          [ -n "$UPDATE_SIGNING_KEY" ] || { echo "::error::не задан секрет UPDATE_SIGNING_KEY"; exit 1; }
+          cargo run --release -q -p switchdesk-sign -- sign "$VERSION" dist/switchdesk-setup.exe
+
+      - name: Подпись сходится с ключом, зашитым в программу
+        shell: bash
+        run: cargo run --release -q -p switchdesk-sign -- verify "$VERSION" dist/switchdesk-setup.exe
+
+      - name: Сумма и портативные exe
+        shell: bash
+        run: |
+          cp target/release/switchdesk-client.exe target/release/switchdesk-host.exe dist/
+          cd dist
+          sha256sum switchdesk-setup.exe switchdesk-client.exe switchdesk-host.exe > SHA256SUMS.txt
+
+      - name: Релиз
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "Switchdesk $VERSION" --generate-notes \
+            dist/switchdesk-setup.exe dist/switchdesk-setup.exe.sig dist/SHA256SUMS.txt \
+            dist/switchdesk-client.exe dist/switchdesk-host.exe

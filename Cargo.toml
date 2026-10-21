@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["proto", "winutil", "host", "client"]
+members = ["proto", "winutil", "host", "client", "update", "tools/sign"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ license = "MIT"
 windows-sys = "0.61"
 switchdesk-proto = { path = "proto" }
 switchdesk-win = { path = "winutil" }
+switchdesk-update = { path = "update" }
 
 [workspace.lints.rust]
 # switchdesk_check: проверка Windows-кода на Linux (см. README, раздел «Разработка»)

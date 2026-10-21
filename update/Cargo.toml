@@ -1,0 +1,16 @@
+[package]
+name = "switchdesk-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ed25519-dalek = "2"
+serde_json = "1"
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinHttp",
+] }
+
+[lints]
+workspace = true

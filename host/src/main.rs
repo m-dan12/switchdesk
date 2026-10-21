@@ -22,9 +22,9 @@ switchdesk-host — приёмник ввода
                Для работы по Tailscale укажите адрес вида 100.x.y.z:7878.
   --grace-ms   пауза удалённого ввода после физического (по умолчанию 1500, 0 — выкл.)";
 
-fn parse_args() -> Config {
+fn parse_args(args: Vec<String>) -> Config {
     let mut cfg = Config { bind: "127.0.0.1:7878".into(), grace_ms: 1500 };
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--bind" => cfg.bind = args.next().unwrap_or_else(|| die("--bind требует значение")),
@@ -35,7 +35,7 @@ fn parse_args() -> Config {
                     .unwrap_or_else(|| die("--grace-ms требует число"))
             }
             "-h" | "--help" => {
-                println!("{USAGE}");
+                println!("{USAGE}\n\n{}", switchdesk_update::cli::USAGE);
                 std::process::exit(0);
             }
             other => die(&format!("неизвестный аргумент: {other}\n\n{USAGE}")),
@@ -50,7 +50,13 @@ pub fn die(msg: &str) -> ! {
 }
 
 fn main() {
-    let cfg = parse_args();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let upd = switchdesk_update::cli::take_flags(&mut args);
+    if upd.is_command() {
+        switchdesk_update::cli::run("switchdesk-host", &upd, &args);
+    }
+    let cfg = parse_args(args.clone());
+    switchdesk_update::cli::run("switchdesk-host", &upd, &args);
     #[cfg(any(windows, switchdesk_check))]
     win::run(cfg);
     #[cfg(not(any(windows, switchdesk_check)))]
