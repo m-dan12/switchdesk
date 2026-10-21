@@ -2164,7 +2164,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "switchdesk"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "eframe",
  "switchdesk-core",
@@ -2176,7 +2176,7 @@ dependencies = [
 
 [[package]]
 name = "switchdesk-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2188,11 +2188,11 @@ dependencies = [
 
 [[package]]
 name = "switchdesk-proto"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "switchdesk-sign"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
@@ -2201,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "switchdesk-update"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ed25519-dalek",
  "serde_json",
@@ -2210,7 +2210,7 @@ dependencies = [
 
 [[package]]
 name = "switchdesk-win"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "switchdesk-proto",
  "windows-sys 0.61.2",

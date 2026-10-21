@@ -19,12 +19,12 @@ use windows_sys::Win32::System::DataExchange::AddClipboardFormatListener;
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::{
-    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT,
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, MOUSE_VIRTUAL_DESKTOP, RAWINPUT,
     RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIM_TYPEMOUSE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DefWindowProcW, SetWindowsHookExW, HC_ACTION, KBDLLHOOKSTRUCT,
-    LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP, LLMHF_INJECTED, MB_ICONEXCLAMATION, MB_ICONHAND,
+    CallNextHookEx, DefWindowProcW, GetSystemMetrics, SetWindowsHookExW, HC_ACTION, KBDLLHOOKSTRUCT,
+    LLKHF_EXTENDED, LLKHF_INJECTED, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, LLKHF_UP, LLMHF_INJECTED, MB_ICONEXCLAMATION, MB_ICONHAND,
     MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_CLIPBOARDUPDATE, WM_INPUT, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
     WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
@@ -114,6 +114,8 @@ pub fn enter_remote() {
             inject::key_up_vk(vk as u16);
         }
     }
+    *LAST_ABS.lock().unwrap() = None;
+    MOVE_LOGGED.store(false, Relaxed);
     REMOTE.store(true, Relaxed);
 }
 
@@ -250,6 +252,27 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 
 // ───────────────── Raw Input ─────────────────
 
+/// Предыдущая позиция абсолютного устройства (тачпад, RDP, виртуальная машина).
+static LAST_ABS: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+/// Чтобы написать в журнал о первом событии движения за сессию, а не о каждом.
+static MOVE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Переводит абсолютные координаты устройства (0..65535) в смещение в пикселях.
+fn absolute_delta(x: i32, y: i32, virtual_desktop: bool) -> Option<(i32, i32)> {
+    let mut last = LAST_ABS.lock().unwrap();
+    let prev = last.replace((x, y))?;
+    let (cx, cy) = unsafe {
+        if virtual_desktop {
+            (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN))
+        } else {
+            (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+        }
+    };
+    let dx = ((x - prev.0) as i64 * cx as i64 / 65535) as i32;
+    let dy = ((y - prev.1) as i64 * cy as i64 / 65535) as i32;
+    Some((dx, dy))
+}
+
 unsafe fn handle_raw_input(lparam: LPARAM) {
     if !REMOTE.load(Relaxed) {
         return;
@@ -267,11 +290,26 @@ unsafe fn handle_raw_input(lparam: LPARAM) {
         return;
     }
     let raw = &*(buf.as_ptr() as *const RAWINPUT);
-    if raw.header.dwType == RIM_TYPEMOUSE {
-        let m = raw.data.mouse;
-        // Абсолютные устройства (тачпады, RDP, виртуалки) в MVP не поддерживаются.
-        if m.usFlags & MOUSE_MOVE_ABSOLUTE == 0 && (m.lLastX != 0 || m.lLastY != 0) {
-            send(Event::Input(ClientMsg::MouseMove { dx: m.lLastX, dy: m.lLastY }));
+    if raw.header.dwType != RIM_TYPEMOUSE {
+        return;
+    }
+    let m = raw.data.mouse;
+    let absolute = m.usFlags & MOUSE_MOVE_ABSOLUTE != 0;
+    let delta = if absolute {
+        absolute_delta(m.lLastX, m.lLastY, m.usFlags & MOUSE_VIRTUAL_DESKTOP != 0)
+    } else {
+        Some((m.lLastX, m.lLastY))
+    };
+    if let Some((dx, dy)) = delta {
+        if dx != 0 || dy != 0 {
+            if !MOVE_LOGGED.swap(true, Relaxed) {
+                crate::state::log(if absolute {
+                    "Движение мыши: устройство абсолютное (тачпад/RDP/виртуалка), пересчитываю в смещения"
+                } else {
+                    "Движение мыши: события получены"
+                });
+            }
+            send(Event::Input(ClientMsg::MouseMove { dx, dy }));
         }
     }
 }
@@ -353,7 +391,7 @@ pub fn start() {
 
 fn input_thread() {
     unsafe {
-        let Some(hwnd) = window::create_message_window("SwitchdeskInput", Some(input_wnd_proc)) else {
+        let Some(hwnd) = window::create_hidden_window("SwitchdeskInput", Some(input_wnd_proc)) else {
             crate::state::log("Не удалось создать окно для Raw Input — движение мыши не будет передаваться");
             return;
         };
@@ -364,7 +402,12 @@ fn input_thread() {
             hwndTarget: hwnd,
         };
         if RegisterRawInputDevices(&rid, 1, size_of::<RAWINPUTDEVICE>() as u32) == 0 {
-            crate::state::log("RegisterRawInputDevices не удался — движение мыши не будет передаваться");
+            crate::state::log(format!(
+                "RegisterRawInputDevices не удался ({}) — движение мыши не будет передаваться",
+                std::io::Error::last_os_error()
+            ));
+        } else {
+            crate::state::log("Raw Input для мыши зарегистрирован");
         }
 
         let hinst = GetModuleHandleW(ptr::null());

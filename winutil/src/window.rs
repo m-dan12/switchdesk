@@ -51,6 +51,49 @@ pub fn create_message_window(class_name: &str, proc: WNDPROC) -> Option<HWND> {
     }
 }
 
+/// Создаёт обычное скрытое окно верхнего уровня. Нужно там, где message-only окно
+/// не подходит: например, WM_INPUT (Raw Input) надёжно приходит только обычным окнам.
+pub fn create_hidden_window(class_name: &str, proc: WNDPROC) -> Option<HWND> {
+    const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+    unsafe {
+        let hinst = GetModuleHandleW(ptr::null());
+        let class = wide(class_name);
+        let wc = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: proc,
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinst,
+            hIcon: ptr::null_mut(),
+            hCursor: ptr::null_mut(),
+            hbrBackground: ptr::null_mut(),
+            lpszMenuName: ptr::null(),
+            lpszClassName: class.as_ptr(),
+        };
+        RegisterClassW(&wc);
+        // без WS_VISIBLE окно не показывается; TOOLWINDOW — чтобы не попасть на панель задач
+        let hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            class.as_ptr(),
+            class.as_ptr(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            hinst,
+            ptr::null(),
+        );
+        if hwnd.is_null() {
+            None
+        } else {
+            Some(hwnd)
+        }
+    }
+}
+
 /// Крутит цикл сообщений текущего потока до WM_QUIT. Нужен и хукам, и окну.
 pub fn run_message_loop() {
     unsafe {
