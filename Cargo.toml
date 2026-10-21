@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["proto", "winutil", "host", "client"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+windows-sys = "0.61"
+kvm-proto = { path = "proto" }
+kvm-win = { path = "winutil" }
+
+[workspace.lints.rust]
+# kvm_check: проверка Windows-кода на Linux (см. README, раздел «Разработка»)
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kvm_check)'] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

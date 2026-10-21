@@ -1,0 +1,21 @@
+[package]
+name = "kvm-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kvm-proto.workspace = true
+kvm-win.workspace = true
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_DataExchange",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_Input",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true
