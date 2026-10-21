@@ -1,11 +1,14 @@
 name: Release
 
-# Выпуск: поднять версию в Cargo.toml ([workspace.package]), закоммитить и поставить тег vX.Y.Z.
+# Выпуск: поднять версию в Cargo.toml ([workspace.package]), закоммитить в main, затем либо
+# поставить тег vX.Y.Z, либо запустить этот workflow вручную (Actions -> Release -> Run workflow):
+# тег vВЕРСИЯ создастся сам на текущем коммите.
 # Нужен секрет репозитория UPDATE_SIGNING_KEY (hex-ключ ed25519, пара к PUBLIC_KEY_HEX в update/src/lib.rs).
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,11 +23,12 @@ jobs:
       - name: Версия тега совпадает с Cargo.toml
         shell: bash
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           cargo_ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          echo "tag=$tag cargo=$cargo_ver"
-          [ "$tag" = "$cargo_ver" ] || { echo "::error::тег $GITHUB_REF_NAME не совпадает с версией $cargo_ver"; exit 1; }
-          echo "VERSION=$tag" >> "$GITHUB_ENV"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "${GITHUB_REF_NAME#v}" = "$cargo_ver" ] || { echo "::error::тег $GITHUB_REF_NAME не совпадает с версией $cargo_ver"; exit 1; }
+          fi
+          echo "VERSION=$cargo_ver" >> "$GITHUB_ENV"
+          echo "TAG=v$cargo_ver" >> "$GITHUB_ENV"
 
       - run: cargo test --workspace
       - run: cargo build --release
@@ -60,6 +64,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --title "Switchdesk $VERSION" --generate-notes \
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "Switchdesk $VERSION" --generate-notes \
             dist/switchdesk-setup.exe dist/switchdesk-setup.exe.sig dist/SHA256SUMS.txt \
             dist/switchdesk-client.exe dist/switchdesk-host.exe
