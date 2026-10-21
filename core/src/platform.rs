@@ -1,18 +1,19 @@
-//! Windows-часть клиента: глобальные хуки, Raw Input, горячая клавиша, буфер обмена.
+//! Windows-часть: глобальные хуки, Raw Input, горячая клавиша, буфер обмена.
 //!
 //! Принцип: в режиме «удалённо» хуки проглатывают локальный ввод и кладут события
 //! в канал сетевого потока. Переключение «обратно» выполняется прямо в хуке —
 //! не дожидаясь сети, поэтому из зависшей сессии всегда есть выход.
+//! Заодно хуки замечают физический ввод за этим компьютером (приоритет над удалённым).
 
 use std::mem::size_of;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
-use std::sync::mpsc::{self, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
-use switchdesk_proto::{Button, ClientMsg};
-use switchdesk_win::{clipboard, inject, window};
+use switchdesk_proto::{Button, ClientMsg, HostMsg};
+use switchdesk_win::{clipboard, inject, tick_ms, window};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::DataExchange::AddClipboardFormatListener;
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
@@ -29,8 +30,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
-use crate::net::{self, Event};
-use crate::Config;
+use crate::client_net::Event;
+use crate::host::net as host_net;
 
 // Виртуальные коды (в LL-хуке модификаторы приходят уже разделёнными на левые/правые).
 const VK_F12: u32 = 0x7B;
@@ -67,12 +68,39 @@ static MODS: AtomicU32 = AtomicU32::new(0);
 static SUPPRESS_UP_VK: AtomicU32 = AtomicU32::new(0);
 static TX: OnceLock<Sender<Event>> = OnceLock::new();
 /// Последний синхронизированный текст — защита от эха.
-static CLIP_LAST: Mutex<String> = Mutex::new(String::new());
+pub(crate) static CLIP_LAST: Mutex<String> = Mutex::new(String::new());
+/// Момент (tick_ms) последнего физического ввода на этом компьютере; 0 — не было.
+static LAST_LOCAL_MS: AtomicU64 = AtomicU64::new(0);
+static GRACE_MS: AtomicU64 = AtomicU64::new(1500);
 
 fn send(ev: Event) {
     if let Some(tx) = TX.get() {
         let _ = tx.send(ev);
     }
+}
+
+pub fn set_sender(tx: Sender<Event>) {
+    let _ = TX.set(tx);
+}
+
+pub fn set_grace(ms: u64) {
+    GRACE_MS.store(ms, Relaxed);
+}
+
+/// Работал ли кто-то за этим компьютером физически совсем недавно.
+pub fn local_recent() -> bool {
+    let grace = GRACE_MS.load(Relaxed);
+    let last = LAST_LOCAL_MS.load(Relaxed);
+    grace > 0 && last != 0 && tick_ms().saturating_sub(last) < grace
+}
+
+fn mark_local() {
+    LAST_LOCAL_MS.store(tick_ms(), Relaxed);
+}
+
+/// true — ваш ввод сейчас уходит на другой компьютер.
+pub fn is_remote() -> bool {
+    REMOTE.load(Relaxed)
 }
 
 // ───────────────── вызывается сетевым потоком ─────────────────
@@ -135,7 +163,8 @@ fn update_mods(vk: u32, down: bool) {
     }
 }
 
-fn toggle() {
+/// То же, что горячая клавиша: войти в «удалённо» или вернуться.
+pub fn toggle() {
     // Выход из «удалённо» делаем здесь же и сразу: он не зависит от сети.
     if REMOTE.swap(false, Relaxed) {
         send(Event::Leave);
@@ -149,6 +178,7 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         let k = &*(lparam as *const KBDLLHOOKSTRUCT);
         // Собственные синтетические события (сброс модификаторов) пропускаем как есть.
         if k.flags & LLKHF_INJECTED == 0 {
+            mark_local();
             let up = k.flags & LLKHF_UP != 0;
             update_mods(k.vkCode, !up);
 
@@ -183,9 +213,13 @@ unsafe extern "system" fn kbd_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && REMOTE.load(Relaxed) {
+    if code == HC_ACTION as i32 {
         let m = &*(lparam as *const MSLLHOOKSTRUCT);
         if m.flags & LLMHF_INJECTED == 0 {
+            mark_local();
+            if !REMOTE.load(Relaxed) {
+                return CallNextHookEx(ptr::null_mut(), code, wparam, lparam);
+            }
             let hi = ((m.mouseData >> 16) & 0xFFFF) as u16;
             let button = |button, down| Some(ClientMsg::MouseButton { button, down });
             let msg = match wparam as u32 {
@@ -258,7 +292,14 @@ unsafe extern "system" fn input_wnd_proc(
 // ───────────────── буфер обмена ─────────────────
 
 fn on_clipboard_changed() {
-    if !REMOTE.load(Relaxed) || clipboard::is_excluded() {
+    let remote = REMOTE.load(Relaxed);
+    let mgr = host_net::manager();
+    let hosting = !remote && mgr.has_active();
+    if !(remote || hosting) || clipboard::is_excluded() {
+        return;
+    }
+    // Если за этим компьютером физически работают, его копирование не уходит удалённому пользователю.
+    if hosting && local_recent() {
         return;
     }
     let Some(text) = clipboard::get_text() else { return };
@@ -269,7 +310,11 @@ fn on_clipboard_changed() {
         }
         *last = text.clone();
     }
-    send(Event::Clip(text));
+    if remote {
+        send(Event::Clip(text));
+    } else {
+        mgr.send_active(&HostMsg::Clipboard(text));
+    }
 }
 
 unsafe extern "system" fn clip_wnd_proc(
@@ -287,12 +332,12 @@ unsafe extern "system" fn clip_wnd_proc(
 
 /// Отдельный поток, чтобы чтение буфера (повторы при занятости) не задерживало хуки.
 fn clipboard_thread() {
-    let Some(hwnd) = window::create_message_window("SwitchdeskClientClipboard", Some(clip_wnd_proc)) else {
-        eprintln!("[client] не удалось создать окно буфера обмена — синхронизация отключена");
+    let Some(hwnd) = window::create_message_window("SwitchdeskClipboard", Some(clip_wnd_proc)) else {
+        crate::state::log("Не удалось создать окно буфера обмена — синхронизация отключена");
         return;
     };
     if unsafe { AddClipboardFormatListener(hwnd) } == 0 {
-        eprintln!("[client] AddClipboardFormatListener не удался — синхронизация отключена");
+        crate::state::log("AddClipboardFormatListener не удался — синхронизация отключена");
         return;
     }
     window::run_message_loop();
@@ -300,16 +345,17 @@ fn clipboard_thread() {
 
 // ───────────────── запуск ─────────────────
 
-pub fn run(cfg: Config) {
-    let (tx, rx) = mpsc::channel();
-    let _ = TX.set(tx.clone());
-    thread::spawn(move || net::run(rx, tx, cfg));
+/// Запускает потоки хуков и буфера обмена. Ошибки пишутся в журнал.
+pub fn start() {
     thread::spawn(clipboard_thread);
+    thread::spawn(input_thread);
+}
 
+fn input_thread() {
     unsafe {
-        let Some(hwnd) = window::create_message_window("SwitchdeskClientInput", Some(input_wnd_proc))
-        else {
-            crate::die("не удалось создать окно для Raw Input");
+        let Some(hwnd) = window::create_message_window("SwitchdeskInput", Some(input_wnd_proc)) else {
+            crate::state::log("Не удалось создать окно для Raw Input — движение мыши не будет передаваться");
+            return;
         };
         let rid = RAWINPUTDEVICE {
             usUsagePage: 0x01, // Generic Desktop
@@ -318,17 +364,16 @@ pub fn run(cfg: Config) {
             hwndTarget: hwnd,
         };
         if RegisterRawInputDevices(&rid, 1, size_of::<RAWINPUTDEVICE>() as u32) == 0 {
-            crate::die("RegisterRawInputDevices не удался");
+            crate::state::log("RegisterRawInputDevices не удался — движение мыши не будет передаваться");
         }
 
         let hinst = GetModuleHandleW(ptr::null());
         if SetWindowsHookExW(WH_KEYBOARD_LL, Some(kbd_proc), hinst, 0).is_null()
             || SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0).is_null()
         {
-            crate::die("не удалось установить глобальные хуки ввода");
+            crate::state::log("Не удалось установить глобальные хуки ввода — переключение не заработает");
+            return;
         }
     }
-
-    eprintln!("[client] готов. Ctrl+Alt+F12 — переключить ввод на хост и обратно.");
     window::run_message_loop();
 }

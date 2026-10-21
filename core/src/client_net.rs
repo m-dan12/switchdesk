@@ -1,4 +1,4 @@
-//! Сетевой поток клиента: соединение, отправка событий пачками, heartbeat, обработка кика.
+//! Сетевой поток отправляющей стороны: соединение, отправка событий пачками, heartbeat, обработка кика.
 
 use std::io::{self, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 
 use switchdesk_proto::{coalesce, encode_frame, read_msg, write_msg, ClientMsg, HostMsg, VERSION};
 
-use crate::win::{self, Beep};
-use crate::Config;
+use crate::platform::{self as win, Beep};
+use crate::settings::Settings;
+use crate::state::{self, Mode};
+use crate::{engine, host};
 
 pub enum Event {
     /// Ввод с хуков (только в режиме «удалённо»).
@@ -41,9 +43,8 @@ fn other(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
 }
 
-fn connect(cfg: &Config, id: u64, tx: &Sender<Event>) -> io::Result<Conn> {
-    let addr = cfg
-        .host
+fn connect(addr: &str, name: &str, id: u64, tx: &Sender<Event>) -> io::Result<Conn> {
+    let addr = addr
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| other("адрес не разрешился"))?;
@@ -52,9 +53,9 @@ fn connect(cfg: &Config, id: u64, tx: &Sender<Event>) -> io::Result<Conn> {
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
 
-    write_msg(&mut stream, &ClientMsg::Hello { version: VERSION, name: cfg.name.clone() })?;
+    write_msg(&mut stream, &ClientMsg::Hello { version: VERSION, name: name.to_owned() })?;
     match read_msg::<HostMsg, _>(&mut stream)? {
-        HostMsg::Welcome { host_name, .. } => eprintln!("[client] подключён к {host_name}"),
+        HostMsg::Welcome { host_name, .. } => state::log(format!("Подключено: {host_name}")),
         HostMsg::Rejected { reason } => return Err(other(format!("хост отклонил: {reason}"))),
         _ => return Err(other("неожиданный ответ хоста")),
     }
@@ -98,15 +99,16 @@ fn flush(conn: &mut Option<Conn>, pending: &mut Vec<ClientMsg>) -> bool {
 fn drop_conn(conn: &mut Option<Conn>, reason: &str, beep: Option<Beep>) {
     if let Some(c) = conn.take() {
         let _ = c.stream.shutdown(Shutdown::Both);
-        eprintln!("[client] отключён: {reason}");
+        state::log(format!("Отключено: {reason}"));
     }
     win::leave_remote();
+    state::set_mode(Mode::Local);
     if let Some(b) = beep {
         win::beep(b);
     }
 }
 
-pub fn run(rx: Receiver<Event>, tx: Sender<Event>, cfg: Config) {
+pub fn run(rx: Receiver<Event>, tx: Sender<Event>) {
     let mut conn: Option<Conn> = None;
     let mut next_id = 1u64;
     let mut pending: Vec<ClientMsg> = Vec::new();
@@ -134,20 +136,7 @@ pub fn run(rx: Receiver<Event>, tx: Sender<Event>, cfg: Config) {
                 }
                 Event::Enter => {
                     if conn.is_none() {
-                        match connect(&cfg, next_id, &tx) {
-                            Ok(c) => {
-                                next_id += 1;
-                                conn = Some(c);
-                                win::enter_remote();
-                                if let Some(text) = win::initial_clipboard() {
-                                    pending.push(ClientMsg::Clipboard(text));
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("[client] не удалось подключиться к {}: {e}", cfg.host);
-                                win::beep(Beep::Error);
-                            }
-                        }
+                        enter(&mut conn, &mut next_id, &mut pending, &tx);
                     }
                 }
                 Event::Leave => {
@@ -156,7 +145,7 @@ pub fn run(rx: Receiver<Event>, tx: Sender<Event>, cfg: Config) {
                         pending.push(ClientMsg::ReleaseAll);
                         let _ = flush(&mut conn, &mut pending);
                     }
-                    drop_conn(&mut conn, "вы вернулись на свой компьютер", None);
+                    drop_conn(&mut conn, "вы вернулись на этот компьютер", None);
                 }
                 Event::FromHost(id, msg) => {
                     let Some(c) = conn.as_mut().filter(|c| c.id == id) else { continue };
@@ -164,10 +153,10 @@ pub fn run(rx: Receiver<Event>, tx: Sender<Event>, cfg: Config) {
                     match msg {
                         HostMsg::Kicked { by } => {
                             pending.clear();
-                            drop_conn(&mut conn, &format!("хост занял «{by}»"), Some(Beep::Error));
+                            drop_conn(&mut conn, &format!("компьютер занял «{by}»"), Some(Beep::Error));
                         }
                         HostMsg::LocalActivity => {
-                            eprintln!("[client] за хостом работают физически — ввод временно игнорируется");
+                            state::log("За тем компьютером сейчас работают физически — ваш ввод временно игнорируется");
                             win::beep(Beep::Notice);
                         }
                         HostMsg::Clipboard(t) => win::apply_host_clipboard(&t),
@@ -197,7 +186,40 @@ pub fn run(rx: Receiver<Event>, tx: Sender<Event>, cfg: Config) {
         if !flush(&mut conn, &mut pending) {
             drop_conn(&mut conn, "ошибка записи в сеть", Some(Beep::Error));
         } else if conn.as_ref().is_some_and(|c| c.last_rx.elapsed() > HOST_TIMEOUT) {
-            drop_conn(&mut conn, "хост не отвечает", Some(Beep::Error));
+            drop_conn(&mut conn, "компьютер не отвечает", Some(Beep::Error));
+        }
+    }
+}
+
+/// Горячая клавиша / кнопка: подключиться к выбранному компьютеру и начать отправку ввода.
+fn enter(conn: &mut Option<Conn>, next_id: &mut u64, pending: &mut Vec<ClientMsg>, tx: &Sender<Event>) {
+    let settings: Settings = engine::current_settings();
+    let Some(peer) = settings.target_peer().cloned() else {
+        state::log("Не выбран компьютер для переключения — добавьте его в окне Switchdesk");
+        win::beep(Beep::Error);
+        return;
+    };
+    if host::net::manager().has_active() {
+        state::log("Этим компьютером сейчас управляют — переключиться нельзя");
+        win::beep(Beep::Error);
+        return;
+    }
+    state::set_mode(Mode::Connecting(peer.name.clone()));
+    match connect(&peer.addr, &settings.device_name, *next_id, tx) {
+        Ok(c) => {
+            *next_id += 1;
+            *conn = Some(c);
+            win::enter_remote();
+            state::set_mode(Mode::Remote(peer.name.clone()));
+            state::log(format!("Ввод переключён на «{}»", peer.name));
+            if let Some(text) = win::initial_clipboard() {
+                pending.push(ClientMsg::Clipboard(text));
+            }
+        }
+        Err(e) => {
+            state::set_mode(Mode::Local);
+            state::log(format!("Не удалось подключиться к «{}» ({}): {e}", peer.name, peer.addr));
+            win::beep(Beep::Error);
         }
     }
 }

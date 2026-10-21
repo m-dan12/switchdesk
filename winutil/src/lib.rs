@@ -5,8 +5,11 @@
 #![cfg(any(windows, switchdesk_check))]
 #![allow(clippy::missing_safety_doc)]
 
+pub mod autostart;
 pub mod clipboard;
 pub mod inject;
+pub mod net;
+pub mod single;
 pub mod window;
 
 /// Строка в UTF-16 с нулевым терминатором.

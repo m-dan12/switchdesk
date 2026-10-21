@@ -5,8 +5,8 @@ use std::ptr;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage, HWND_MESSAGE,
-    MSG, WNDCLASSW, WNDPROC,
+    CreateWindowExW, DispatchMessageW, FindWindowW, GetMessageW, RegisterClassW, SetForegroundWindow,
+    ShowWindow, TranslateMessage, HWND_MESSAGE, MSG, SW_RESTORE, SW_SHOW, WNDCLASSW, WNDPROC,
 };
 
 use crate::wide;
@@ -59,5 +59,20 @@ pub fn run_message_loop() {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+/// Показывает и выводит на передний план окно верхнего уровня с таким заголовком.
+pub fn show_window_by_title(title: &str) -> bool {
+    let t = wide(title);
+    unsafe {
+        let hwnd = FindWindowW(ptr::null(), t.as_ptr());
+        if hwnd.is_null() {
+            return false;
+        }
+        ShowWindow(hwnd, SW_SHOW);
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+        true
     }
 }

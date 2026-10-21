@@ -1,6 +1,6 @@
 ; Установщик Switchdesk (Inno Setup 6). Сборка:
-;   iscc /DAppVersion=0.1.0 installer\switchdesk.iss
-; Ожидает собранные exe в target\release.
+;   iscc /DAppVersion=0.2.0 installer\switchdesk.iss
+; Ожидает собранный target\release\switchdesk.exe.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -14,8 +14,8 @@ AppPublisher=m-dan12
 AppPublisherURL=https://github.com/m-dan12/switchdesk
 DefaultDirName={autopf}\Switchdesk
 DisableProgramGroupPage=yes
-; По умолчанию — установка для текущего пользователя без UAC (так обновления тихие).
-; Для установки на все профили выберите режим «для всех пользователей» в начале мастера.
+DisableDirPage=auto
+; Установка для текущего пользователя без UAC — так обновления проходят тихо.
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
@@ -28,98 +28,37 @@ WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayName=Switchdesk
+UninstallDisplayIcon={app}\switchdesk.exe
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
-[Types]
-Name: "client"; Description: "Только клиент (ваш компьютер)"
-Name: "host"; Description: "Только хост (общий компьютер)"
-Name: "full"; Description: "Клиент и хост"
-Name: "custom"; Description: "Выборочная установка"; Flags: iscustom
-
-[Components]
-Name: "client"; Description: "Клиент (перехват клавиатуры и мыши)"; Types: client full custom
-Name: "host"; Description: "Хост (приём ввода)"; Types: host full custom
-
 [Tasks]
-Name: "autostart"; Description: "Запускать при входе в Windows"; Flags: unchecked
+Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; Flags: unchecked
+
+[InstallDelete]
+; остатки версии 0.1 (два отдельных приложения)
+Type: files; Name: "{app}\switchdesk-client.exe"
+Type: files; Name: "{app}\switchdesk-host.exe"
+Type: files; Name: "{autoprograms}\Switchdesk клиент.lnk"
+Type: files; Name: "{autoprograms}\Switchdesk хост.lnk"
+Type: files; Name: "{userstartup}\Switchdesk клиент.lnk"
+Type: files; Name: "{userstartup}\Switchdesk хост.lnk"
 
 [Files]
-Source: "..\target\release\switchdesk-client.exe"; DestDir: "{app}"; Components: client; Flags: ignoreversion
-Source: "..\target\release\switchdesk-host.exe"; DestDir: "{app}"; Components: host; Flags: ignoreversion
+Source: "..\target\release\switchdesk.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Switchdesk клиент"; Filename: "{app}\switchdesk-client.exe"; Parameters: "{code:ClientParams}"; Components: client; Check: ClientConfigured
-Name: "{autoprograms}\Switchdesk хост"; Filename: "{app}\switchdesk-host.exe"; Parameters: "{code:HostParams}"; Components: host; Check: HostConfigured
-Name: "{userstartup}\Switchdesk клиент"; Filename: "{app}\switchdesk-client.exe"; Parameters: "{code:ClientParams}"; Components: client; Tasks: autostart; Check: ClientConfigured; Flags: runminimized
-Name: "{userstartup}\Switchdesk хост"; Filename: "{app}\switchdesk-host.exe"; Parameters: "{code:HostParams}"; Components: host; Tasks: autostart; Check: HostConfigured; Flags: runminimized
+Name: "{autoprograms}\Switchdesk"; Filename: "{app}\switchdesk.exe"
+Name: "{autodesktop}\Switchdesk"; Filename: "{app}\switchdesk.exe"; Tasks: desktopicon
+
+[Registry]
+; автозапуск включается самим приложением (Настройки → «Запускать при входе в Windows»);
+; при удалении программы убираем запись
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Switchdesk"; Flags: dontcreatekey uninsdeletevalue
 
 [Run]
-Filename: "{app}\switchdesk-client.exe"; Parameters: "{code:ClientParams}"; Description: "Запустить клиент"; Components: client; Check: ClientConfigured; Flags: nowait postinstall skipifsilent
-Filename: "{app}\switchdesk-host.exe"; Parameters: "{code:HostParams}"; Description: "Запустить хост"; Components: host; Check: HostConfigured; Flags: nowait postinstall skipifsilent unchecked
+Filename: "{app}\switchdesk.exe"; Description: "Запустить Switchdesk"; Flags: nowait postinstall skipifsilent
 
-[Code]
-var
-  ClientPage, HostPage: TInputQueryWizardPage;
-
-function Clean(S: String): String;
-begin
-  StringChangeEx(S, '"', '', True);
-  Result := Trim(S);
-end;
-
-procedure InitializeWizard;
-begin
-  ClientPage := CreateInputQueryPage(wpSelectComponents, 'Клиент',
-    'К какому хосту подключаться', 'Адрес хоста в Tailscale и имя, под которым вас увидят.');
-  ClientPage.Add('Адрес хоста (например, server.tailnet.ts.net:7878):', False);
-  ClientPage.Add('Ваше имя:', False);
-  ClientPage.Values[0] := GetPreviousData('ClientHost', '');
-  ClientPage.Values[1] := GetPreviousData('ClientName', GetComputerNameString);
-
-  HostPage := CreateInputQueryPage(ClientPage.ID, 'Хост',
-    'На каком адресе принимать ввод', 'Укажите адрес Tailscale этого компьютера (100.x.y.z:7878), не 0.0.0.0.');
-  HostPage.Add('Адрес прослушивания:', False);
-  HostPage.Values[0] := GetPreviousData('HostBind', '');
-end;
-
-procedure RegisterPreviousData(PreviousDataKey: Integer);
-begin
-  SetPreviousData(PreviousDataKey, 'ClientHost', Clean(ClientPage.Values[0]));
-  SetPreviousData(PreviousDataKey, 'ClientName', Clean(ClientPage.Values[1]));
-  SetPreviousData(PreviousDataKey, 'HostBind', Clean(HostPage.Values[0]));
-end;
-
-function ShouldSkipPage(PageID: Integer): Boolean;
-begin
-  Result := False;
-  if PageID = ClientPage.ID then
-    Result := not WizardIsComponentSelected('client');
-  if PageID = HostPage.ID then
-    Result := not WizardIsComponentSelected('host');
-end;
-
-function ClientConfigured: Boolean;
-begin
-  Result := Clean(ClientPage.Values[0]) <> '';
-end;
-
-function HostConfigured: Boolean;
-begin
-  Result := Clean(HostPage.Values[0]) <> '';
-end;
-
-function ClientParams(Param: String): String;
-var
-  Name: String;
-begin
-  Name := Clean(ClientPage.Values[1]);
-  if Name = '' then Name := 'client';
-  Result := '--host "' + Clean(ClientPage.Values[0]) + '" --name "' + Name + '"';
-end;
-
-function HostParams(Param: String): String;
-begin
-  Result := '--bind "' + Clean(HostPage.Values[0]) + '"';
-end;
+[UninstallRun]
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM switchdesk.exe"; Flags: runhidden; RunOnceId: "StopSwitchdesk"

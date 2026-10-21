@@ -55,9 +55,9 @@ jobs:
       - name: Сумма и портативные exe
         shell: bash
         run: |
-          cp target/release/switchdesk-client.exe target/release/switchdesk-host.exe dist/
+          cp target/release/switchdesk.exe dist/
           cd dist
-          sha256sum switchdesk-setup.exe switchdesk-client.exe switchdesk-host.exe > SHA256SUMS.txt
+          sha256sum switchdesk-setup.exe switchdesk.exe > SHA256SUMS.txt
 
       - name: Релиз
         shell: bash
@@ -66,4 +66,4 @@ jobs:
         run: |
           gh release create "$TAG" --target "$GITHUB_SHA" --title "Switchdesk $VERSION" --generate-notes \
             dist/switchdesk-setup.exe dist/switchdesk-setup.exe.sig dist/SHA256SUMS.txt \
-            dist/switchdesk-client.exe dist/switchdesk-host.exe
+            dist/switchdesk.exe

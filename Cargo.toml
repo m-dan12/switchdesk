@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["proto", "winutil", "host", "client", "update", "tools/sign"]
+members = ["proto", "winutil", "core", "update", "app", "tools/sign"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 
@@ -12,13 +12,14 @@ windows-sys = "0.61"
 switchdesk-proto = { path = "proto" }
 switchdesk-win = { path = "winutil" }
 switchdesk-update = { path = "update" }
+switchdesk-core = { path = "core" }
 
 [workspace.lints.rust]
 # switchdesk_check: проверка Windows-кода на Linux (см. README, раздел «Разработка»)
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(switchdesk_check)'] }
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"

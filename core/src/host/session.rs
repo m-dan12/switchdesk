@@ -46,13 +46,13 @@ impl<B: Backend> Manager<B> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut guard = self.active.lock().unwrap();
         if let Some(old) = guard.take() {
-            eprintln!("[host] «{}» вытеснен клиентом «{}»", old.name, name);
+            crate::state::log(format!("«{}» вытеснен: управление взял «{}»", old.name, name));
             old.peer.send(&HostMsg::Kicked { by: name.clone() });
             old.peer.close();
             self.backend.release_all();
             self.backend.clear_clipboard();
         }
-        eprintln!("[host] активен клиент «{}»", name);
+        crate::state::log(format!("«{}» управляет этим компьютером", name));
         *guard = Some(Active { id, name, peer });
         id
     }
@@ -62,7 +62,7 @@ impl<B: Backend> Manager<B> {
         let mut guard = self.active.lock().unwrap();
         if guard.as_ref().map(|a| a.id) == Some(id) {
             let old = guard.take().unwrap();
-            eprintln!("[host] клиент «{}» отключился", old.name);
+            crate::state::log(format!("«{}» отключился", old.name));
             self.backend.release_all();
             self.backend.clear_clipboard();
         }
@@ -88,6 +88,20 @@ impl<B: Backend> Manager<B> {
 
     pub fn has_active(&self) -> bool {
         self.active.lock().unwrap().is_some()
+    }
+
+    /// Имя того, кто сейчас управляет этим компьютером.
+    pub fn active_name(&self) -> Option<String> {
+        self.active.lock().unwrap().as_ref().map(|a| a.name.clone())
+    }
+
+    /// Закрывает активную сессию (если есть) и приводит хост в чистое состояние.
+    pub fn reset(&self) {
+        let old = self.active.lock().unwrap().take();
+        if let Some(old) = old {
+            old.peer.close();
+        }
+        self.backend.release_all();
     }
 }
 

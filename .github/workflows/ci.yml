@@ -20,3 +20,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: RUSTFLAGS="--cfg switchdesk_check" cargo check --workspace
+  ui-preview:
+    # Снимки окна в разных состояниях → ветка ui-preview (для проверки внешнего вида)
+    if: github.event_name == 'push'
+    needs: windows
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p switchdesk
+      - name: Снимки
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath target\release\switchdesk.exe -ArgumentList '--demo-screenshots', "$PWD\shots" -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); Write-Error "окно не завершило прогон за 90 с" }
+          Get-ChildItem shots
+      - name: Публикация в ветку ui-preview
+        if: always()
+        shell: bash
+        run: |
+          [ -d shots ] || exit 0
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git checkout --orphan ui-preview
+          git rm -rf -q . || true
+          mkdir -p preview && cp shots/*.png preview/
+          git add preview
+          git commit -q -m "UI preview for ${GITHUB_SHA}"
+          git push -f origin ui-preview
