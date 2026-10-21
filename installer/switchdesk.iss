@@ -32,9 +32,15 @@ UninstallDisplayName=Switchdesk
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
+[Types]
+Name: "client"; Description: "Только клиент (ваш компьютер)"
+Name: "host"; Description: "Только хост (общий компьютер)"
+Name: "full"; Description: "Клиент и хост"
+Name: "custom"; Description: "Выборочная установка"; Flags: iscustom
+
 [Components]
-Name: "client"; Description: "Клиент (ваш компьютер: перехват клавиатуры и мыши)"
-Name: "host"; Description: "Хост (общий компьютер: приём ввода)"; Flags: unchecked
+Name: "client"; Description: "Клиент (перехват клавиатуры и мыши)"; Types: client full custom
+Name: "host"; Description: "Хост (приём ввода)"; Types: host full custom
 
 [Tasks]
 Name: "autostart"; Description: "Запускать при входе в Windows"; Flags: unchecked
