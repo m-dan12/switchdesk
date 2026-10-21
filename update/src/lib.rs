@@ -15,7 +15,7 @@ pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 pub const INSTALLER_ASSET: &str = "switchdesk-setup.exe";
 pub const SIG_ASSET: &str = "switchdesk-setup.exe.sig";
 /// Публичный ключ подписи релизов (hex, 32 байта). Пара к секрету `UPDATE_SIGNING_KEY`.
-pub const PUBLIC_KEY_HEX: &str = "ff14f05700079f9d35841e248e90cb60d4920d6b067999de78e970fec5f39892";
+pub const PUBLIC_KEY_HEX: &str = "e63c9c43f511430ebb947aca1952e1dda5ac6833f2fc00e93e17a10c07271192";
 
 const MAX_JSON: usize = 1024 * 1024;
 const MAX_INSTALLER: usize = 64 * 1024 * 1024;
