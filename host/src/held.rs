@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use kvm_proto::{Button, ClientMsg};
+use switchdesk_proto::{Button, ClientMsg};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Decision {

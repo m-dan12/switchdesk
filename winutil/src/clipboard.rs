@@ -2,7 +2,7 @@
 
 use std::{ptr, thread, time::Duration};
 
-use kvm_proto::MAX_CLIPBOARD_BYTES;
+use switchdesk_proto::MAX_CLIPBOARD_BYTES;
 use windows_sys::Win32::Foundation::{GlobalFree, HWND};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,

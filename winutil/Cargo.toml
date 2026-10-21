@@ -1,11 +1,11 @@
 [package]
-name = "kvm-win"
+name = "switchdesk-win"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-kvm-proto.workspace = true
+switchdesk-proto.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",

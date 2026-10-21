@@ -1,12 +1,12 @@
 [package]
-name = "kvm-host"
+name = "switchdesk-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-kvm-proto.workspace = true
-kvm-win.workspace = true
+switchdesk-proto.workspace = true
+switchdesk-win.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_System_DataExchange",

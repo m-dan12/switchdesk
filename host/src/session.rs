@@ -6,7 +6,7 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use kvm_proto::HostMsg;
+use switchdesk_proto::HostMsg;
 
 /// Побочные эффекты на хосте.
 pub trait Backend: Send + Sync {

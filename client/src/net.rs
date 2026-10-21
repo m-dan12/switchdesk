@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kvm_proto::{coalesce, encode_frame, read_msg, write_msg, ClientMsg, HostMsg, VERSION};
+use switchdesk_proto::{coalesce, encode_frame, read_msg, write_msg, ClientMsg, HostMsg, VERSION};
 
 use crate::win::{self, Beep};
 use crate::Config;

@@ -1,9 +1,9 @@
-//! kvm-client: перехватывает мышь и клавиатуру и по горячей клавише (Ctrl+Alt+F12)
+//! switchdesk-client: перехватывает мышь и клавиатуру и по горячей клавише (Ctrl+Alt+F12)
 //! перенаправляет их на хост; повторное нажатие возвращает ввод на этот компьютер.
 
-#[cfg(any(windows, kvm_check))]
+#[cfg(any(windows, switchdesk_check))]
 mod net;
-#[cfg(any(windows, kvm_check))]
+#[cfg(any(windows, switchdesk_check))]
 mod win;
 
 pub struct Config {
@@ -14,9 +14,9 @@ pub struct Config {
 }
 
 const USAGE: &str = "\
-kvm-client — переключатель мыши и клавиатуры
+switchdesk-client — переключатель мыши и клавиатуры
 
-  kvm-client --host АДРЕС:ПОРТ [--name ИМЯ]
+  switchdesk-client --host АДРЕС:ПОРТ [--name ИМЯ]
 
   --host   адрес хоста, например server.tailnet.ts.net:7878 или 100.x.y.z:7878
   --name   ваше имя (по умолчанию — имя компьютера)
@@ -50,11 +50,11 @@ fn parse_args() -> Config {
 
 fn main() {
     let cfg = parse_args();
-    #[cfg(any(windows, kvm_check))]
+    #[cfg(any(windows, switchdesk_check))]
     win::run(cfg);
-    #[cfg(not(any(windows, kvm_check)))]
+    #[cfg(not(any(windows, switchdesk_check)))]
     {
         let _ = cfg;
-        die("kvm-client работает только на Windows");
+        die("switchdesk-client работает только на Windows");
     }
 }

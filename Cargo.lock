@@ -3,32 +3,32 @@
 version = 4
 
 [[package]]
-name = "kvm-client"
+name = "switchdesk-client"
 version = "0.1.0"
 dependencies = [
- "kvm-proto",
- "kvm-win",
+ "switchdesk-proto",
+ "switchdesk-win",
  "windows-sys",
 ]
 
 [[package]]
-name = "kvm-host"
+name = "switchdesk-host"
 version = "0.1.0"
 dependencies = [
- "kvm-proto",
- "kvm-win",
+ "switchdesk-proto",
+ "switchdesk-win",
  "windows-sys",
 ]
 
 [[package]]
-name = "kvm-proto"
+name = "switchdesk-proto"
 version = "0.1.0"
 
 [[package]]
-name = "kvm-win"
+name = "switchdesk-win"
 version = "0.1.0"
 dependencies = [
- "kvm-proto",
+ "switchdesk-proto",
  "windows-sys",
 ]
 

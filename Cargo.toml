@@ -9,12 +9,12 @@ license = "MIT"
 
 [workspace.dependencies]
 windows-sys = "0.61"
-kvm-proto = { path = "proto" }
-kvm-win = { path = "winutil" }
+switchdesk-proto = { path = "proto" }
+switchdesk-win = { path = "winutil" }
 
 [workspace.lints.rust]
-# kvm_check: проверка Windows-кода на Linux (см. README, раздел «Разработка»)
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kvm_check)'] }
+# switchdesk_check: проверка Windows-кода на Linux (см. README, раздел «Разработка»)
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(switchdesk_check)'] }
 
 [profile.release]
 opt-level = "z"

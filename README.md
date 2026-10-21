@@ -1,4 +1,4 @@
-# kvm-switch
+# switchdesk
 
 Программный переключатель мыши и клавиатуры (+ текстовый буфер обмена) между компьютерами.
 По горячей клавише ваш ввод уходит на общий компьютер, повторное нажатие возвращает его обратно.
@@ -22,21 +22,21 @@
 cargo build --release
 ```
 
-Нужен Rust для Windows (`x86_64-pc-windows-msvc`). Бинарники: `target\release\kvm-host.exe`,
-`target\release\kvm-client.exe`.
+Нужен Rust для Windows (`x86_64-pc-windows-msvc`). Бинарники: `target\release\switchdesk-host.exe`,
+`target\release\switchdesk-client.exe`.
 
 ## Запуск
 
 На общем компьютере (адрес — его адрес в Tailscale):
 
 ```
-kvm-host --bind 100.x.y.z:7878
+switchdesk-host --bind 100.x.y.z:7878
 ```
 
 На своём компьютере:
 
 ```
-kvm-client --host server.tailnet.ts.net:7878 --name Даниил
+switchdesk-client --host server.tailnet.ts.net:7878 --name Даниил
 ```
 
 Дальше: **Ctrl+Alt+F12** — переключить ввод на хост / обратно.
@@ -89,11 +89,11 @@ Windows-таргет Rust может быть недоступен (наприм
 cargo test --workspace
 ```
 
-Windows-код можно проверить на типы под Linux/macOS — он компилируется при `--cfg kvm_check`
+Windows-код можно проверить на типы под Linux/macOS — он компилируется при `--cfg switchdesk_check`
 (линковка при этом не выполняется):
 
 ```
-RUSTFLAGS="--cfg kvm_check" cargo check --workspace
+RUSTFLAGS="--cfg switchdesk_check" cargo check --workspace
 ```
 
 Это проверяет типы и сигнатуры `windows-sys`, но не поведение.

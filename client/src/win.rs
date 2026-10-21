@@ -11,8 +11,8 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
-use kvm_proto::{Button, ClientMsg};
-use kvm_win::{clipboard, inject, window};
+use switchdesk_proto::{Button, ClientMsg};
+use switchdesk_win::{clipboard, inject, window};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::DataExchange::AddClipboardFormatListener;
 use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
@@ -287,7 +287,7 @@ unsafe extern "system" fn clip_wnd_proc(
 
 /// Отдельный поток, чтобы чтение буфера (повторы при занятости) не задерживало хуки.
 fn clipboard_thread() {
-    let Some(hwnd) = window::create_message_window("KvmClientClipboard", Some(clip_wnd_proc)) else {
+    let Some(hwnd) = window::create_message_window("SwitchdeskClientClipboard", Some(clip_wnd_proc)) else {
         eprintln!("[client] не удалось создать окно буфера обмена — синхронизация отключена");
         return;
     };
@@ -307,7 +307,7 @@ pub fn run(cfg: Config) {
     thread::spawn(clipboard_thread);
 
     unsafe {
-        let Some(hwnd) = window::create_message_window("KvmClientInput", Some(input_wnd_proc))
+        let Some(hwnd) = window::create_message_window("SwitchdeskClientInput", Some(input_wnd_proc))
         else {
             crate::die("не удалось создать окно для Raw Input");
         };

@@ -1,9 +1,9 @@
-//! kvm-host: принимает ввод от одного активного клиента и внедряет его на этом компьютере.
-#![cfg_attr(not(any(windows, kvm_check)), allow(dead_code))]
+//! switchdesk-host: принимает ввод от одного активного клиента и внедряет его на этом компьютере.
+#![cfg_attr(not(any(windows, switchdesk_check)), allow(dead_code))]
 
 mod held;
 mod session;
-#[cfg(any(windows, kvm_check))]
+#[cfg(any(windows, switchdesk_check))]
 mod win;
 
 pub struct Config {
@@ -14,9 +14,9 @@ pub struct Config {
 }
 
 const USAGE: &str = "\
-kvm-host — приёмник ввода
+switchdesk-host — приёмник ввода
 
-  kvm-host [--bind АДРЕС:ПОРТ] [--grace-ms N]
+  switchdesk-host [--bind АДРЕС:ПОРТ] [--grace-ms N]
 
   --bind       адрес прослушивания (по умолчанию 127.0.0.1:7878).
                Для работы по Tailscale укажите адрес вида 100.x.y.z:7878.
@@ -51,11 +51,11 @@ pub fn die(msg: &str) -> ! {
 
 fn main() {
     let cfg = parse_args();
-    #[cfg(any(windows, kvm_check))]
+    #[cfg(any(windows, switchdesk_check))]
     win::run(cfg);
-    #[cfg(not(any(windows, kvm_check)))]
+    #[cfg(not(any(windows, switchdesk_check)))]
     {
         let _ = cfg;
-        die("kvm-host работает только на Windows");
+        die("switchdesk-host работает только на Windows");
     }
 }

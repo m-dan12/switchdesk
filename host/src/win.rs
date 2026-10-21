@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kvm_proto::{read_msg, write_msg, ClientMsg, HostMsg, MAX_CLIPBOARD_BYTES, VERSION};
-use kvm_win::{clipboard, inject, tick_ms, window};
+use switchdesk_proto::{read_msg, write_msg, ClientMsg, HostMsg, MAX_CLIPBOARD_BYTES, VERSION};
+use switchdesk_win::{clipboard, inject, tick_ms, window};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::DataExchange::AddClipboardFormatListener;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -263,7 +263,7 @@ unsafe extern "system" fn clip_wnd_proc(
 
 /// Отдельный поток: сокетная запись не должна задерживать хуки (у них таймаут ~300 мс).
 fn clipboard_thread() {
-    let Some(hwnd) = window::create_message_window("KvmHostClipboard", Some(clip_wnd_proc)) else {
+    let Some(hwnd) = window::create_message_window("SwitchdeskHostClipboard", Some(clip_wnd_proc)) else {
         eprintln!("[host] не удалось создать окно буфера обмена — синхронизация отключена");
         return;
     };

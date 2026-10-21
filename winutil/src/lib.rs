@@ -1,8 +1,8 @@
 //! Общий Windows-код для host и client: буфер обмена, SendInput, служебные окна.
 //!
 //! На других ОС крейт пуст. Для проверки типов на Linux:
-//! `RUSTFLAGS="--cfg kvm_check" cargo check --workspace`.
-#![cfg(any(windows, kvm_check))]
+//! `RUSTFLAGS="--cfg switchdesk_check" cargo check --workspace`.
+#![cfg(any(windows, switchdesk_check))]
 #![allow(clippy::missing_safety_doc)]
 
 pub mod clipboard;
