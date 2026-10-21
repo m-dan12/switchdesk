@@ -105,7 +105,7 @@ fn run_window(minimized: bool, engine: switchdesk_core::Engine, demo: Option<std
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(tray::WINDOW_TITLE)
-            .with_inner_size([470.0, 780.0])
+            .with_inner_size([470.0, 720.0])
             .with_min_inner_size([420.0, 520.0])
             .with_icon(Arc::new(icon))
             .with_visible(!minimized),

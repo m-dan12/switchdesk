@@ -42,9 +42,11 @@ pub fn apply_theme(ctx: &egui::Context) {
     v.widgets.inactive.weak_bg_fill = Color32::from_rgb(0x22, 0x26, 0x31);
     v.widgets.hovered.bg_fill = Color32::from_rgb(0x2b, 0x30, 0x3d);
     v.widgets.hovered.weak_bg_fill = Color32::from_rgb(0x2b, 0x30, 0x3d);
-    ctx.set_visuals(v);
+    // Тема не должна зависеть от системной (иначе виджеты рисуются светлыми на тёмном фоне).
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.set_visuals_of(egui::Theme::Dark, v);
 
-    ctx.global_style_mut(|s| {
+    ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = Vec2::new(8.0, 8.0);
         s.spacing.button_padding = Vec2::new(12.0, 7.0);
         s.spacing.interact_size.y = 30.0;
@@ -195,6 +197,29 @@ impl App {
 
     // ───────────── карточки ─────────────
 
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        let UpdateState::Available(v) = self.snap.update.clone() else { return };
+        let busy = self.snap.mode != Mode::Local || self.snap.hosting.is_some();
+        egui::Frame::new()
+            .fill(Color32::from_rgb(0x2a, 0x22, 0x10))
+            .stroke(Stroke::new(1.0, AMBER))
+            .corner_radius(12)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Доступна версия {v}")).color(AMBER).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let b = egui::Button::new(RichText::new("Обновить").color(Color32::WHITE)).fill(ACCENT);
+                        if ui.add_enabled(!busy, b).on_disabled_hover_text("Сначала верните ввод на этот компьютер").clicked() {
+                            self.engine.install_update(true);
+                        }
+                    });
+                });
+            });
+        ui.add_space(12.0);
+    }
+
     fn status_card(&mut self, ui: &mut egui::Ui) {
         let target = self.draft.target_peer().map(|p| p.name.clone());
         let snap = self.snap.clone();
@@ -237,7 +262,8 @@ impl App {
                 }
                 (Mode::Local, Some(t)) => {
                     let can = snap.hosting.is_none();
-                    if Self::big_button(ui, &format!("Переключить на «{t}»"), ACCENT, can) {
+                    let label = if can { format!("Переключить на «{t}»") } else { "Недоступно, пока вами управляют".to_string() };
+                    if Self::big_button(ui, &label, if can { ACCENT } else { Color32::from_rgb(0x3a, 0x40, 0x52) }, can) {
                         self.engine.toggle();
                     }
                 }
@@ -245,8 +271,13 @@ impl App {
             }
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Горячая клавиша:").color(MUTED).small());
-                ui.label(RichText::new(HOTKEY).monospace().small());
+                ui.label(RichText::new("Горячая клавиша").color(MUTED));
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(0x22, 0x26, 0x31))
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .corner_radius(6)
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .show(ui, |ui| ui.label(RichText::new(HOTKEY).monospace()));
             });
         });
     }
@@ -473,16 +504,10 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG).inner_margin(16))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Switchdesk").size(22.0).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let UpdateState::Available(v) = &self.snap.update {
-                            ui.label(RichText::new(format!("Доступна {v}")).color(AMBER).small());
-                        }
-                    });
-                });
+                ui.label(RichText::new("Switchdesk").size(22.0).strong());
                 ui.add_space(8.0);
                 egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    self.update_banner(ui);
                     self.status_card(ui);
                     self.peers_card(ui, &mut dirty);
                     self.this_pc_card(ui, &mut dirty);
