@@ -25,6 +25,7 @@ fn main() -> eframe::Result {
     let minimized = args.iter().any(|a| a == "--minimized");
     // служебный флаг для проверки внешнего вида: --tab host|settings
     let tab = args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).cloned();
+    winapp::disable_throttling();
     capture::start();
     let opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

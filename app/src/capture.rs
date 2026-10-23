@@ -50,6 +50,8 @@ fn shield(on: bool) {
             let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
             let (w, hh) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, hh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            // Мышь замирает, WM_SETCURSOR больше не приходит: ставим обычную стрелку сами.
+            let _ = SendMessageW(hwnd, WM_SETCURSOR, Some(WPARAM(hwnd.0 as usize)), Some(LPARAM(1 | ((WM_MOUSEMOVE as isize) << 16))));
         } else {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
@@ -60,6 +62,10 @@ unsafe extern "system" fn shield_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPA
     unsafe {
         if msg == WM_MOUSEACTIVATE {
             return LRESULT(MA_NOACTIVATE as isize);
+        }
+        if msg == WM_SETCURSOR {
+            SetCursor(Some(LoadCursorW(None, IDC_ARROW).unwrap_or_default()));
+            return LRESULT(1);
         }
         DefWindowProcW(hwnd, msg, w, l)
     }
@@ -342,7 +348,9 @@ unsafe fn create_raw_window(hinst: HINSTANCE) {
         };
         register_raw(hwnd);
         let sclass = w!("SwitchDeskShield");
-        let swc = WNDCLASSW { lpfnWndProc: Some(shield_wndproc), hInstance: hinst, lpszClassName: sclass, ..Default::default() };
+        // Без курсора у класса окна Windows показывала бы курсор «занят» над накладкой.
+        let arrow = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
+        let swc = WNDCLASSW { lpfnWndProc: Some(shield_wndproc), hInstance: hinst, lpszClassName: sclass, hCursor: arrow, ..Default::default() };
         RegisterClassW(&swc);
         if let Ok(sh) = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED,
@@ -376,6 +384,11 @@ pub fn start() {
         std::thread::spawn(|| unsafe {
             let hmod = GetModuleHandleW(None).unwrap_or_default();
             let hinst = HINSTANCE(hmod.0);
+            // Хуки ввода держат всю систему: поток должен получать процессор раньше остальных.
+            let _ = windows::Win32::System::Threading::SetThreadPriority(
+                windows::Win32::System::Threading::GetCurrentThread(),
+                windows::Win32::System::Threading::THREAD_PRIORITY_HIGHEST,
+            );
             HOOK_TID.store(GetCurrentThreadId(), SeqCst);
             let install = || {
                 (

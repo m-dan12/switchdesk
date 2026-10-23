@@ -10,6 +10,26 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
 };
 
+/// Не даёт Windows 11 переводить скрытое окно в режим эффективности (EcoQoS): в нём потоки
+/// просыпаются с задержкой, и мышь через сеть подлагивает. Заодно чуть повышает приоритет процесса.
+pub fn disable_throttling() {
+    use windows::Win32::System::Threading::*;
+    unsafe {
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        let _ = SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &state as *const _ as *const _,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+        let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+    }
+}
+
 pub const WINDOW_TITLE: &str = "SwitchDesk";
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const RUN_VALUE: PCWSTR = w!("SwitchDesk");
