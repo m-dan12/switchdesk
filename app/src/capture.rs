@@ -6,7 +6,7 @@
 //! Горячая клавиша Ctrl+Alt+F12 включает/выключает захват.
 
 use crate::proto::Ev;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, Once};
 use windows::core::w;

@@ -40,21 +40,17 @@ pub fn apply(client: &Client, target: &str) {
     }
     let cfg = Config::load();
     if target.eq_ignore_ascii_case(&cfg.pc_name) {
-        // Выбран сам этот компьютер: просто вернуть ввод себе и отключиться.
+        // Выбран сам этот компьютер: вернуть ввод себе, соединения остаются открытыми.
         if capture::is_active() {
             capture::toggle();
         }
-        client.disconnect();
         return;
     }
     let Some(dev) = cfg.devices.iter().find(|d| d.name.eq_ignore_ascii_case(target)).cloned() else { return };
     if capture::is_active() {
         capture::toggle();
     }
-    let same = matches!(client.status(), Status::Connected(_)) && client.target() == Some(dev.name.clone());
-    if !same {
-        client.connect(dev.clone(), cfg.pc_name.clone());
-    }
+    client.connect(dev.clone(), cfg.pc_name.clone());
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(6) {
         if matches!(client.status(), Status::Connected(_)) {

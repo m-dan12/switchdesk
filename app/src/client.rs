@@ -1,13 +1,19 @@
-//! Клиентская сторона: соединение с одним выбранным устройством.
+//! Клиентская сторона: соединения с устройствами. Подключение к устройству остаётся открытым, когда
+//! вы переключаетесь на другое или возвращаете ввод себе, поэтому возврат на него мгновенный.
+//! Ввод и буфер обмена идут только на активное устройство.
 
 use crate::capture;
 use crate::clip::ClipSync;
 use crate::config::{Device, DEFAULT_PORT};
 use crate::proto::{self, Ev, Msg, Tx};
+use std::collections::HashMap;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Как часто пустой пакет проверяет, что фоновое соединение живо.
+const PING_EVERY: Duration = Duration::from_secs(5);
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Status {
@@ -17,113 +23,169 @@ pub enum Status {
     Error(String),
 }
 
+struct Conn {
+    id: u64,
+    tx: Tx,
+    ev: Sender<Ev>,
+    host_name: String,
+}
+
+struct Inner {
+    pool: HashMap<String, Conn>,
+    /// Имя устройства, на которое сейчас направлены ввод и буфер обмена.
+    active: Option<String>,
+    status: Status,
+    /// Номер последнего запроса: устаревшие потоки не должны менять активное устройство.
+    epoch: u64,
+    next_id: u64,
+}
+
 #[derive(Clone)]
 pub struct Client {
-    pub status: Arc<Mutex<Status>>,
-    closer: Arc<Mutex<Option<Tx>>>,
-    /// Номер текущей попытки: устаревшие потоки не должны менять статус.
-    epoch: Arc<AtomicU64>,
-    /// Имя устройства последнего подключения.
-    target: Arc<Mutex<Option<String>>>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl Client {
     pub fn new() -> Client {
         Client {
-            status: Arc::new(Mutex::new(Status::Idle)),
-            closer: Arc::new(Mutex::new(None)),
-            epoch: Arc::new(AtomicU64::new(0)),
-            target: Arc::new(Mutex::new(None)),
+            inner: Arc::new(Mutex::new(Inner {
+                pool: HashMap::new(),
+                active: None,
+                status: Status::Idle,
+                epoch: 0,
+                next_id: 1,
+            })),
         }
     }
 
     pub fn status(&self) -> Status {
-        self.status.lock().unwrap().clone()
+        self.inner.lock().unwrap().status.clone()
     }
 
-    pub fn target(&self) -> Option<String> {
-        self.target.lock().unwrap().clone()
-    }
-
+    /// Закрывает активное соединение совсем (фоновые остаются).
     pub fn disconnect(&self) {
-        *self.target.lock().unwrap() = None;
-        self.epoch.fetch_add(1, SeqCst);
-        if let Some(tx) = self.closer.lock().unwrap().take() {
-            tx.close();
+        let mut g = self.inner.lock().unwrap();
+        g.epoch += 1;
+        if let Some(name) = g.active.take() {
+            if let Some(c) = g.pool.remove(&name) {
+                c.tx.close();
+            }
         }
         capture::set_sink(None);
-        *self.status.lock().unwrap() = Status::Idle;
+        g.status = Status::Idle;
     }
 
-    /// Подключение к устройству (предыдущее соединение закрывается).
+    /// Делает устройство активным: готовое соединение подхватывается сразу, иначе открывается новое.
+    /// Соединение с прежним устройством не закрывается.
     pub fn connect(&self, dev: Device, my_name: String) {
-        self.disconnect();
-        let my_epoch = self.epoch.load(SeqCst);
-        *self.target.lock().unwrap() = Some(dev.name.clone());
-        *self.status.lock().unwrap() = Status::Connecting;
-        let me = self.clone();
-        let (status, closer, epoch) = (self.status.clone(), self.closer.clone(), self.epoch.clone());
+        let my_epoch = {
+            let mut g = self.inner.lock().unwrap();
+            g.epoch += 1;
+            if let Some(c) = g.pool.get(&dev.name) {
+                // Пустой пакет: если соединение умерло, отправка не удастся.
+                if c.tx.send(&Msg::Events { e: Vec::new() }).is_ok() {
+                    let (ev, host) = (c.ev.clone(), c.host_name.clone());
+                    g.active = Some(dev.name.clone());
+                    g.status = Status::Connected(host);
+                    capture::set_sink(Some(ev));
+                    return;
+                }
+                if let Some(c) = g.pool.remove(&dev.name) {
+                    c.tx.close();
+                }
+            }
+            g.active = None;
+            capture::set_sink(None);
+            g.status = Status::Connecting;
+            g.epoch
+        };
+        let inner = self.inner.clone();
         std::thread::spawn(move || {
-            let current = || epoch.load(SeqCst) == my_epoch;
-            let set = |s: Status| {
-                if current() {
-                    *status.lock().unwrap() = s;
+            let fail = |msg: String| {
+                let mut g = inner.lock().unwrap();
+                if g.epoch == my_epoch {
+                    g.status = Status::Error(msg);
                 }
             };
             let stream = match open(&dev.addr) {
                 Ok(s) => s,
-                Err(e) => return set(Status::Error(format!("не удалось подключиться: {e}"))),
+                Err(e) => return fail(format!("не удалось подключиться: {e}")),
             };
             let (tx, mut rx, host_name) = match proto::client_handshake(stream, dev.token.trim(), &my_name) {
                 Ok(v) => v,
-                Err(e) => return set(Status::Error(e.to_string())),
+                Err(e) => return fail(e.to_string()),
             };
-            if !current() {
-                tx.close();
-                return;
-            }
-            *closer.lock().unwrap() = Some(tx.clone());
 
-            // События ввода -> хост (с объединением движений мыши).
+            // События ввода -> хост (с объединением движений мыши); в простое проверка связи.
             let (ev_tx, ev_rx) = mpsc::channel::<Ev>();
             let sender_tx = tx.clone();
-            std::thread::spawn(move || {
-                while let Ok(first) = ev_rx.recv() {
-                    let mut batch = vec![first];
-                    while batch.len() < 512 {
-                        match ev_rx.try_recv() {
-                            Ok(e) => batch.push(e),
-                            Err(_) => break,
+            std::thread::spawn(move || loop {
+                let batch = match ev_rx.recv_timeout(PING_EVERY) {
+                    Ok(first) => {
+                        let mut batch = vec![first];
+                        while batch.len() < 512 {
+                            match ev_rx.try_recv() {
+                                Ok(e) => batch.push(e),
+                                Err(_) => break,
+                            }
                         }
+                        merge(batch)
                     }
-                    if sender_tx.send(&Msg::Events { e: merge(batch) }).is_err() {
-                        break;
-                    }
+                    Err(RecvTimeoutError::Timeout) => Vec::new(),
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+                if sender_tx.send(&Msg::Events { e: batch }).is_err() {
+                    break;
                 }
             });
-            // Буфер обмена в обе стороны.
-            let clip_tx = tx.clone();
+
+            // Буфер обмена: только для активного устройства.
+            let name = dev.name.clone();
+            let (clip_inner, clip_tx, clip_name) = (inner.clone(), tx.clone(), name.clone());
             let clip = ClipSync::spawn(move |kind, data| {
-                let _ = clip_tx.send(&Msg::Clip { kind: kind.to_string(), data });
+                if clip_inner.lock().unwrap().active.as_deref() == Some(clip_name.as_str()) {
+                    let _ = clip_tx.send(&Msg::Clip { kind: kind.to_string(), data });
+                }
             });
 
-            capture::set_sink(Some(ev_tx));
-            set(Status::Connected(host_name));
+            let id = {
+                let mut g = inner.lock().unwrap();
+                let id = g.next_id;
+                g.next_id += 1;
+                if let Some(old) = g.pool.insert(
+                    name.clone(),
+                    Conn { id, tx: tx.clone(), ev: ev_tx.clone(), host_name: host_name.clone() },
+                ) {
+                    old.tx.close();
+                }
+                if g.epoch == my_epoch {
+                    g.active = Some(name.clone());
+                    g.status = Status::Connected(host_name);
+                    capture::set_sink(Some(ev_tx));
+                }
+                id
+            };
 
+            let me = Client { inner: inner.clone() };
             while let Ok(msg) = rx.recv() {
+                let is_active = inner.lock().unwrap().active.as_deref() == Some(name.as_str());
                 match msg {
-                    Msg::Clip { kind, data } => clip.apply(&kind, data),
-                    Msg::Switch { target } => {
+                    Msg::Clip { kind, data } if is_active => clip.apply(&kind, data),
+                    Msg::Switch { target } if is_active => {
                         let me = me.clone();
                         std::thread::spawn(move || crate::control::apply(&me, &target));
                     }
                     _ => {}
                 }
             }
-            if current() {
-                capture::set_sink(None);
-                *closer.lock().unwrap() = None;
-                set(Status::Error("соединение закрыто".into()));
+            let mut g = inner.lock().unwrap();
+            if g.pool.get(&name).is_some_and(|c| c.id == id) {
+                g.pool.remove(&name);
+                if g.active.as_deref() == Some(name.as_str()) {
+                    g.active = None;
+                    capture::set_sink(None);
+                    g.status = Status::Error("соединение закрыто".into());
+                }
             }
         });
     }
