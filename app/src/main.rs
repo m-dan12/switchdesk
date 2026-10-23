@@ -5,6 +5,7 @@ mod capture;
 mod client;
 mod clip;
 mod config;
+mod control;
 mod host;
 mod inject;
 mod proto;
@@ -12,10 +13,14 @@ mod updater;
 mod winapp;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(t) = args.iter().position(|a| a == "--switch").and_then(|i| args.get(i + 1)) {
+        control::send(t);
+        return Ok(());
+    }
     if !winapp::claim_single_instance() {
         return Ok(());
     }
-    let args: Vec<String> = std::env::args().collect();
     let minimized = args.iter().any(|a| a == "--minimized");
     // служебный флаг для проверки внешнего вида: --tab host|settings
     let tab = args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).cloned();

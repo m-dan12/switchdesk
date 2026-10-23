@@ -7,7 +7,20 @@ use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Клиент, чей ввод хост принимал последним: именно он сейчас управляет этим компьютером.
+static CONTROLLER: Mutex<Option<(Tx, Instant)>> = Mutex::new(None);
+
+/// Если этим компьютером сейчас кто-то управляет, передаёт ему выбор устройства (иначе получилось бы
+/// цикличное подключение). true — команда ушла управляющему.
+pub fn forward_switch(target: &str) -> bool {
+    let tx = match CONTROLLER.lock().unwrap().as_ref() {
+        Some((tx, at)) if at.elapsed() < Duration::from_secs(3) => tx.clone(),
+        _ => return false,
+    };
+    tx.send(&Msg::Switch { target: target.to_string() }).is_ok()
+}
 
 #[derive(Clone)]
 pub struct ClientInfo {
@@ -125,13 +138,16 @@ fn serve(
     if stop.load(SeqCst) {
         return;
     }
-    txs.lock().unwrap().insert(id, tx);
+    txs.lock().unwrap().insert(id, tx.clone());
     shared.clients.lock().unwrap().push(ClientInfo { id, name, addr });
 
     let mut pressed = Pressed::default();
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Events { e } => {
+                if e.iter().any(|ev| !matches!(ev, Ev::Release)) {
+                    *CONTROLLER.lock().unwrap() = Some((tx.clone(), Instant::now()));
+                }
                 if !shared.allow_input.load(SeqCst) {
                     pressed.release_all();
                     continue;
@@ -149,7 +165,6 @@ fn serve(
                         }
                         Ev::Wheel { v, h } => inject::wheel(v, h),
                         Ev::Key { sc, ext, down } => {
-                            crate::capture::host_log(&format!("host key sc={sc:#04x} ext={ext} down={down} from {}", addr.ip()));
                             if down {
                                 pressed.keys.insert((sc, ext));
                             } else {

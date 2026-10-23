@@ -59,3 +59,17 @@ pub fn key(sc: u16, ext: bool, down: bool) {
         },
     });
 }
+
+/// Заголовок окна, которое сейчас в фокусе (для диагностики).
+pub fn foreground_title() -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+    unsafe {
+        let h = GetForegroundWindow();
+        if h.is_invalid() {
+            return "<нет окна в фокусе>".into();
+        }
+        let mut buf = [0u16; 128];
+        let n = GetWindowTextW(h, &mut buf) as usize;
+        format!("{h:?} \"{}\"", String::from_utf16_lossy(&buf[..n]))
+    }
+}

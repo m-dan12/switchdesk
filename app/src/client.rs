@@ -23,6 +23,8 @@ pub struct Client {
     closer: Arc<Mutex<Option<Tx>>>,
     /// Номер текущей попытки: устаревшие потоки не должны менять статус.
     epoch: Arc<AtomicU64>,
+    /// Имя устройства последнего подключения.
+    target: Arc<Mutex<Option<String>>>,
 }
 
 impl Client {
@@ -31,6 +33,7 @@ impl Client {
             status: Arc::new(Mutex::new(Status::Idle)),
             closer: Arc::new(Mutex::new(None)),
             epoch: Arc::new(AtomicU64::new(0)),
+            target: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -38,7 +41,12 @@ impl Client {
         self.status.lock().unwrap().clone()
     }
 
+    pub fn target(&self) -> Option<String> {
+        self.target.lock().unwrap().clone()
+    }
+
     pub fn disconnect(&self) {
+        *self.target.lock().unwrap() = None;
         self.epoch.fetch_add(1, SeqCst);
         if let Some(tx) = self.closer.lock().unwrap().take() {
             tx.close();
@@ -51,7 +59,9 @@ impl Client {
     pub fn connect(&self, dev: Device, my_name: String) {
         self.disconnect();
         let my_epoch = self.epoch.load(SeqCst);
+        *self.target.lock().unwrap() = Some(dev.name.clone());
         *self.status.lock().unwrap() = Status::Connecting;
+        let me = self.clone();
         let (status, closer, epoch) = (self.status.clone(), self.closer.clone(), self.epoch.clone());
         std::thread::spawn(move || {
             let current = || epoch.load(SeqCst) == my_epoch;
@@ -101,8 +111,13 @@ impl Client {
             set(Status::Connected(host_name));
 
             while let Ok(msg) = rx.recv() {
-                if let Msg::Clip { kind, data } = msg {
-                    clip.apply(&kind, data);
+                match msg {
+                    Msg::Clip { kind, data } => clip.apply(&kind, data),
+                    Msg::Switch { target } => {
+                        let me = me.clone();
+                        std::thread::spawn(move || crate::control::apply(&me, &target));
+                    }
+                    _ => {}
                 }
             }
             if current() {

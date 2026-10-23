@@ -23,6 +23,8 @@ static CTRL: AtomicBool = AtomicBool::new(false);
 static ALT: AtomicBool = AtomicBool::new(false);
 static SWALLOW_F12_UP: AtomicBool = AtomicBool::new(false);
 static RAW_MOVES: AtomicU64 = AtomicU64::new(0);
+static KEYS_SEEN: AtomicU64 = AtomicU64::new(0);
+static MOUSE_SEEN: AtomicU64 = AtomicU64::new(0);
 /// Кольцевой буфер последних клавиш для диагностики (сбрасывается в hook.log при переключении).
 static TRACE: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static SINK: Mutex<Option<Sender<Ev>>> = Mutex::new(None);
@@ -48,13 +50,6 @@ pub fn set_sink(s: Option<Sender<Ev>>) {
 fn emit(ev: Ev) {
     if let Some(tx) = SINK.lock().unwrap().as_ref() {
         let _ = tx.send(ev);
-    }
-}
-
-/// Диагностический лог рядом с конфигом (hook.log).
-pub fn host_log(msg: &str) {
-    if debug() {
-        log(msg)
     }
 }
 
@@ -126,6 +121,7 @@ pub fn toggle() {
 
 unsafe extern "system" fn mouse_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe {
+        MOUSE_SEEN.fetch_add(1, SeqCst);
         if code < 0 || !ACTIVE.load(SeqCst) {
             return CallNextHookEx(None, code, w, l);
         }
@@ -156,6 +152,7 @@ unsafe extern "system" fn mouse_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
 
 unsafe extern "system" fn key_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe {
+        KEYS_SEEN.fetch_add(1, SeqCst);
         if code < 0 {
             return CallNextHookEx(None, code, w, l);
         }
@@ -248,6 +245,20 @@ unsafe extern "system" fn raw_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
     }
 }
 
+/// Раз в секунду пишет, изменились ли счётчики хука и что сейчас в фокусе (только при SWITCHDESK_DEBUG).
+fn heartbeat_thread() {
+    let mut last = (0u64, 0u64, String::new());
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let (k, m) = (KEYS_SEEN.load(SeqCst), MOUSE_SEEN.load(SeqCst));
+        let fg = crate::inject::foreground_title();
+        if last.0 != k || last.1 != m || last.2 != fg {
+            log(&format!("hb keys={k} mouse={m} active={} focus={fg}", ACTIVE.load(SeqCst)));
+            last = (k, m, fg);
+        }
+    }
+}
+
 fn register_raw(hwnd: HWND) {
     let dev = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
     unsafe {
@@ -288,6 +299,9 @@ unsafe fn create_raw_window(hinst: HINSTANCE) {
 pub fn start() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
+        if debug() {
+            std::thread::spawn(heartbeat_thread);
+        }
         std::thread::spawn(|| unsafe {
             let hmod = GetModuleHandleW(None).unwrap_or_default();
             let hinst = HINSTANCE(hmod.0);

@@ -193,6 +193,7 @@ impl App {
         let cfg = Config::load();
         let client = Client::new();
         let updater = Updater::new();
+        crate::control::listen(client.clone());
         let tray = make_tray(&client, &updater);
         cc.egui_ctx.options_mut(|o| o.theme_preference = theme_pref(&cfg.theme));
         let mut app = App {

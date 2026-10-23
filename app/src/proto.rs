@@ -43,6 +43,8 @@ pub enum Msg {
     /// Буфер обмена. kind: "text" (потом "image", "files"...), data: содержимое
     /// (текст как есть, бинарные форматы в base64).
     Clip { kind: String, data: String },
+    /// Хост -> клиент: пользователь выбрал в меню на хосте другое устройство; решает тот, кто управляет.
+    Switch { target: String },
 }
 
 fn err(msg: &str) -> io::Error {
