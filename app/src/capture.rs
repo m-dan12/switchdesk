@@ -10,15 +10,13 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering::SeqCst};
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, Once};
 use windows::core::w;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static CONNECTED: AtomicBool = AtomicBool::new(false);
-static CX: AtomicI32 = AtomicI32::new(0);
-static CY: AtomicI32 = AtomicI32::new(0);
 static CTRL: AtomicBool = AtomicBool::new(false);
 static ALT: AtomicBool = AtomicBool::new(false);
 static SWALLOW_F12_UP: AtomicBool = AtomicBool::new(false);
@@ -103,14 +101,7 @@ pub fn toggle() {
         PRESSED.lock().unwrap().clear();
         emit(Ev::Release);
     } else if CONNECTED.load(SeqCst) {
-        unsafe {
-            let _ = SetCursorPos(GetSystemMetrics(SM_CXSCREEN) / 2, GetSystemMetrics(SM_CYSCREEN) / 2);
-            let mut p = POINT::default();
-            if GetCursorPos(&mut p).is_ok() {
-                CX.store(p.x, SeqCst);
-                CY.store(p.y, SeqCst);
-            }
-        }
+        // Курсор остаётся там, где был: движение мыши в хуке гасится, а на хост уходят сырые дельты.
         RAW_MOVES.store(0, SeqCst);
         ACTIVE.store(true, SeqCst);
         log("capture ON");
