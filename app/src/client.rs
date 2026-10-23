@@ -28,6 +28,7 @@ struct Conn {
     tx: Tx,
     ev: Sender<Ev>,
     host_name: String,
+    clip: Arc<ClipSync>,
 }
 
 struct Inner {
@@ -85,6 +86,7 @@ impl Client {
                 // Пустой пакет: если соединение умерло, отправка не удастся.
                 if c.tx.send(&Msg::Events { e: Vec::new() }).is_ok() {
                     let (ev, host) = (c.ev.clone(), c.host_name.clone());
+                    c.clip.resend();
                     g.active = Some(dev.name.clone());
                     g.status = Status::Connected(host);
                     capture::set_sink(Some(ev));
@@ -142,11 +144,11 @@ impl Client {
             // Буфер обмена: только для активного устройства.
             let name = dev.name.clone();
             let (clip_inner, clip_tx, clip_name) = (inner.clone(), tx.clone(), name.clone());
-            let clip = ClipSync::spawn(move |kind, data| {
+            let clip = Arc::new(ClipSync::spawn(move |kind, data| {
                 if clip_inner.lock().unwrap().active.as_deref() == Some(clip_name.as_str()) {
                     let _ = clip_tx.send(&Msg::Clip { kind: kind.to_string(), data });
                 }
-            });
+            }));
 
             let id = {
                 let mut g = inner.lock().unwrap();
@@ -154,7 +156,7 @@ impl Client {
                 g.next_id += 1;
                 if let Some(old) = g.pool.insert(
                     name.clone(),
-                    Conn { id, tx: tx.clone(), ev: ev_tx.clone(), host_name: host_name.clone() },
+                    Conn { id, tx: tx.clone(), ev: ev_tx.clone(), host_name: host_name.clone(), clip: clip.clone() },
                 ) {
                     old.tx.close();
                 }
@@ -162,6 +164,7 @@ impl Client {
                     g.active = Some(name.clone());
                     g.status = Status::Connected(host_name);
                     capture::set_sink(Some(ev_tx));
+                    clip.resend();
                 }
                 id
             };

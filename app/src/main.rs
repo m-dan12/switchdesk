@@ -9,6 +9,7 @@ mod control;
 mod host;
 mod inject;
 mod proto;
+mod touchpad;
 mod updater;
 mod winapp;
 

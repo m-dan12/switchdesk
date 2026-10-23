@@ -12,6 +12,7 @@ use std::sync::{Mutex, Once};
 use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -25,10 +26,44 @@ static KEYS_SEEN: AtomicU64 = AtomicU64::new(0);
 static MOUSE_SEEN: AtomicU64 = AtomicU64::new(0);
 /// Кольцевой буфер последних клавиш для диагностики (сбрасывается в hook.log при переключении).
 static TRACE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static TOUCH: Mutex<Option<crate::touchpad::Touchpads>> = Mutex::new(None);
+/// Почти невидимое окно на весь экран, пока идёт передача: системная прокрутка тачпада уходит в него,
+/// а не в окно под замершим курсором.
+static SHIELD: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static SINK: Mutex<Option<Sender<Ev>>> = Mutex::new(None);
 static PRESSED: Mutex<Vec<(u16, bool)>> = Mutex::new(Vec::new());
 
 const VK_F12: u32 = 0x7B;
+/// Поток с хуками и его сообщение «переставить хуки наверх цепочки».
+static HOOK_TID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const WM_REHOOK: u32 = WM_APP + 1;
+
+fn shield(on: bool) {
+    let h = SHIELD.load(SeqCst);
+    if h == 0 {
+        return;
+    }
+    let hwnd = HWND(h as *mut _);
+    unsafe {
+        if on {
+            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let (w, hh) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, hh, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        } else {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+unsafe extern "system" fn shield_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    unsafe {
+        if msg == WM_MOUSEACTIVATE {
+            return LRESULT(MA_NOACTIVATE as isize);
+        }
+        DefWindowProcW(hwnd, msg, w, l)
+    }
+}
 
 pub fn is_active() -> bool {
     ACTIVE.load(SeqCst)
@@ -41,6 +76,7 @@ pub fn set_sink(s: Option<Sender<Ev>>) {
     CONNECTED.store(connected, SeqCst);
     if !connected {
         ACTIVE.store(false, SeqCst);
+        shield(false);
         PRESSED.lock().unwrap().clear();
     }
 }
@@ -51,7 +87,7 @@ fn emit(ev: Ev) {
     }
 }
 
-fn log(msg: &str) {
+pub(crate) fn log(msg: &str) {
     use std::io::Write;
     if let Some(base) = std::env::var_os("APPDATA") {
         let p = std::path::Path::new(&base).join("SwitchDesk").join("hook.log");
@@ -98,12 +134,25 @@ pub fn toggle() {
     if ACTIVE.load(SeqCst) {
         log(&format!("capture OFF, raw moves received: {}", RAW_MOVES.swap(0, SeqCst)));
         ACTIVE.store(false, SeqCst);
+        shield(false);
         PRESSED.lock().unwrap().clear();
         emit(Ev::Release);
     } else if CONNECTED.load(SeqCst) {
         // Курсор остаётся там, где был: движение мыши в хуке гасится, а на хост уходят сырые дельты.
         RAW_MOVES.store(0, SeqCst);
+        if let Some(t) = TOUCH.lock().unwrap().as_mut() {
+            t.reset();
+        }
+        // Другие программы (например, радиальное меню на боковых кнопках) тоже ставят хуки и
+        // переставляются наверх цепочки: без этого они забирают кнопки раньше нас.
+        let tid = HOOK_TID.load(SeqCst);
+        if tid != 0 {
+            unsafe {
+                let _ = PostThreadMessageW(tid, WM_REHOOK, WPARAM(0), LPARAM(0));
+            }
+        }
         ACTIVE.store(true, SeqCst);
+        shield(true);
         log("capture ON");
     } else {
         log("toggle ignored: not connected");
@@ -219,7 +268,16 @@ unsafe extern "system" fn raw_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             let got = GetRawInputData(h, RID_INPUT, Some(buf.as_mut_ptr() as *mut _), &mut size, hdr);
             if got == size && size as usize >= std::mem::size_of::<RAWINPUTHEADER>() {
                 let ri = std::ptr::read_unaligned(buf.as_ptr() as *const RAWINPUT);
-                if ri.header.dwType == RIM_TYPEMOUSE.0 {
+                if ri.header.dwType == RIM_TYPEHID.0 {
+                    // Сырой отчёт тачпада: прокрутка двумя пальцами.
+                    let off = hdr as usize;
+                    let (size_hid, count) = (ri.data.hid.dwSizeHid as usize, ri.data.hid.dwCount as usize);
+                    let data = buf.get(off + 8..off + 8 + size_hid * count).unwrap_or(&[]);
+                    let evs = TOUCH.lock().unwrap().get_or_insert_with(Default::default).feed(ri.header.hDevice, size_hid, data);
+                    for e in evs {
+                        emit(e);
+                    }
+                } else if ri.header.dwType == RIM_TYPEMOUSE.0 {
                     let m = ri.data.mouse;
                     // Абсолютные устройства (RDP, планшеты) пропускаем: у них нет смещений.
                     if m.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 == 0 && (m.lLastX != 0 || m.lLastY != 0) {
@@ -251,9 +309,11 @@ fn heartbeat_thread() {
 }
 
 fn register_raw(hwnd: HWND) {
-    let dev = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
+    let mouse = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
+    // Precision Touchpad (страница Digitizer, usage 5).
+    let pad = RAWINPUTDEVICE { usUsagePage: 0x0D, usUsage: 5, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
     unsafe {
-        let _ = RegisterRawInputDevices(&[dev], std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+        let _ = RegisterRawInputDevices(&[mouse, pad], std::mem::size_of::<RAWINPUTDEVICE>() as u32);
     }
 }
 
@@ -281,6 +341,26 @@ unsafe fn create_raw_window(hinst: HINSTANCE) {
             return;
         };
         register_raw(hwnd);
+        let sclass = w!("SwitchDeskShield");
+        let swc = WNDCLASSW { lpfnWndProc: Some(shield_wndproc), hInstance: hinst, lpszClassName: sclass, ..Default::default() };
+        RegisterClassW(&swc);
+        if let Ok(sh) = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+            sclass,
+            w!(""),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(hinst),
+            None,
+        ) {
+            let _ = SetLayeredWindowAttributes(sh, windows::Win32::Foundation::COLORREF(0), 1, LWA_ALPHA);
+            SHIELD.store(sh.0 as isize, SeqCst);
+        }
         SetTimer(Some(hwnd), 1, 250, None);
         log("raw input window ready");
     }
@@ -296,11 +376,29 @@ pub fn start() {
         std::thread::spawn(|| unsafe {
             let hmod = GetModuleHandleW(None).unwrap_or_default();
             let hinst = HINSTANCE(hmod.0);
-            let _kb = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_proc), Some(hinst), 0);
-            let _ms = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(hinst), 0);
+            HOOK_TID.store(GetCurrentThreadId(), SeqCst);
+            let install = || {
+                (
+                    SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_proc), Some(hinst), 0).ok(),
+                    SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(hinst), 0).ok(),
+                )
+            };
+            let mut hooks = install();
             create_raw_window(hinst);
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                if msg.hwnd.is_invalid() && msg.message == WM_REHOOK {
+                    // Новые хуки встают первыми в цепочке; старые снимаем после установки.
+                    let fresh = install();
+                    if let Some(h) = hooks.0.take() {
+                        let _ = UnhookWindowsHookEx(h);
+                    }
+                    if let Some(h) = hooks.1.take() {
+                        let _ = UnhookWindowsHookEx(h);
+                    }
+                    hooks = fresh;
+                    continue;
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
