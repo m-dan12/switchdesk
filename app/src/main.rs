@@ -80,9 +80,14 @@ fn gui(tab: Option<String>) -> eframe::Result {
             .with_min_inner_size([680.0, 440.0]),
         ..Default::default()
     };
-    eframe::run_native(
+    let r = eframe::run_native(
         winapp::WINDOW_TITLE,
         opts,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, tab.as_deref())))),
-    )
+    );
+    if let Err(e) = &r {
+        // Приложение без консоли: причина, по которой окно не открылось, иначе нигде не видна.
+        capture::log(&format!("окно не открылось: {e}"));
+    }
+    r
 }
