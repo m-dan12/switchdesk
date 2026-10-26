@@ -9,14 +9,58 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+struct Controller {
+    id: u64,
+    tx: Tx,
+    at: Instant,
+}
+
 /// Клиент, чей ввод хост принимал последним: именно он сейчас управляет этим компьютером.
-static CONTROLLER: Mutex<Option<(Tx, Instant)>> = Mutex::new(None);
+/// Управляющий всегда один: когда подключается другой, прежнему приходит `Taken`.
+static CONTROLLER: Mutex<Option<Controller>> = Mutex::new(None);
+
+/// Сколько без ввода управляющий считается ушедшим.
+const STALE: Duration = Duration::from_secs(3);
+
+/// Делает клиента управляющим; прежнему управляющему сообщает об этом.
+fn claim(id: u64, tx: &Tx) {
+    let mut g = CONTROLLER.lock().unwrap();
+    if let Some(old) = g.as_ref().filter(|c| c.id != id) {
+        let _ = old.tx.send(&Msg::Taken);
+    }
+    *g = Some(Controller { id, tx: tx.clone(), at: Instant::now() });
+}
+
+/// Принимать ли настоящий ввод (не пинг и не Release) от клиента. Чужой управляющий, который ещё
+/// активен, не прерывается случайными событиями: перехват происходит по `Claim`.
+fn accept_input(id: u64, tx: &Tx) -> bool {
+    let mut g = CONTROLLER.lock().unwrap();
+    match g.as_mut() {
+        Some(c) if c.id == id => {
+            c.at = Instant::now();
+            true
+        }
+        Some(c) if c.at.elapsed() < STALE => false,
+        _ => {
+            drop(g);
+            claim(id, tx);
+            true
+        }
+    }
+}
+
+fn drop_controller(id: u64) {
+    let mut g = CONTROLLER.lock().unwrap();
+    if g.as_ref().is_some_and(|c| c.id == id) {
+        *g = None;
+    }
+}
 
 /// Если этим компьютером сейчас кто-то управляет, передаёт ему выбор устройства (иначе получилось бы
 /// цикличное подключение). true — команда ушла управляющему.
 pub fn forward_switch(target: &str) -> bool {
     let tx = match CONTROLLER.lock().unwrap().as_ref() {
-        Some((tx, at)) if at.elapsed() < Duration::from_secs(3) => tx.clone(),
+        Some(c) if c.at.elapsed() < STALE => c.tx.clone(),
         _ => return false,
     };
     tx.send(&Msg::Switch { target: target.to_string() }).is_ok()
@@ -145,8 +189,9 @@ fn serve(
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Events { e } => {
-                if e.iter().any(|ev| !matches!(ev, Ev::Release)) {
-                    *CONTROLLER.lock().unwrap() = Some((tx.clone(), Instant::now()));
+                if e.iter().any(|ev| !matches!(ev, Ev::Release)) && !accept_input(id, &tx) {
+                    pressed.release_all();
+                    continue;
                 }
                 if !shared.allow_input.load(SeqCst) {
                     pressed.release_all();
@@ -176,6 +221,7 @@ fn serve(
                     }
                 }
             }
+            Msg::Claim => claim(id, &tx),
             Msg::Clip { kind, data } => {
                 // Применяем у себя и пересылаем остальным клиентам.
                 clip.apply(&kind, data.clone());
@@ -185,6 +231,7 @@ fn serve(
         }
     }
     pressed.release_all();
+    drop_controller(id);
     txs.lock().unwrap().remove(&id);
     shared.clients.lock().unwrap().retain(|c| c.id != id);
 }

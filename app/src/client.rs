@@ -84,7 +84,7 @@ impl Client {
             g.epoch += 1;
             if let Some(c) = g.pool.get(&dev.name) {
                 // Пустой пакет: если соединение умерло, отправка не удастся.
-                if c.tx.send(&Msg::Events { e: Vec::new() }).is_ok() {
+                if c.tx.send(&Msg::Events { e: Vec::new() }).is_ok() && c.tx.send(&Msg::Claim).is_ok() {
                     let (ev, host) = (c.ev.clone(), c.host_name.clone());
                     c.clip.resend();
                     g.active = Some(dev.name.clone());
@@ -161,6 +161,7 @@ impl Client {
                     old.tx.close();
                 }
                 if g.epoch == my_epoch {
+                    let _ = tx.send(&Msg::Claim);
                     g.active = Some(name.clone());
                     g.status = Status::Connected(host_name);
                     capture::set_sink(Some(ev_tx));
@@ -174,6 +175,17 @@ impl Client {
                 let is_active = inner.lock().unwrap().active.as_deref() == Some(name.as_str());
                 match msg {
                     Msg::Clip { kind, data } if is_active => clip.apply(&kind, data),
+                    Msg::Taken if is_active => {
+                        // Другой компьютер взял управление: отпускаем ввод, соединение остаётся в запасе.
+                        let mut g = inner.lock().unwrap();
+                        if g.active.as_deref() == Some(name.as_str()) {
+                            g.epoch += 1;
+                            g.active = None;
+                            capture::set_sink(None);
+                            capture::log("управление перехвачено другим компьютером");
+                            g.status = Status::Error("Управление перехвачено другим компьютером".into());
+                        }
+                    }
                     Msg::Switch { target } if is_active => {
                         let me = me.clone();
                         std::thread::spawn(move || crate::control::apply(&me, &target));

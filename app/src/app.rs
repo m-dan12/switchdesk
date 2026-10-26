@@ -184,6 +184,7 @@ pub struct App {
     updater: Updater,
     last_update_check: Instant,
     autostart: bool,
+    elevated_task: bool,
     start_hidden: bool,
     _tray: Option<TrayIcon>,
 }
@@ -211,6 +212,7 @@ impl App {
             addrs: local_addrs(),
             last_update_check: Instant::now(),
             autostart: winapp::autostart_enabled(),
+            elevated_task: winapp::elevated_task_exists(),
             start_hidden: minimized && tray.is_some() && cfg.close_to_tray,
             _tray: tray,
             updater,
@@ -574,6 +576,27 @@ impl App {
                     if toggle(ui, &mut on, p) {
                         winapp::set_autostart(on);
                         self.autostart = winapp::autostart_enabled();
+                    }
+                });
+                divider(ui, p);
+                let hint = if winapp::is_elevated() {
+                    "Запущено с правами администратора: диспетчер задач и игры управляются"
+                } else {
+                    "Нужно для диспетчера задач и игр с повышенными правами. Запрос UAC один раз"
+                };
+                row_setting(ui, p, "Запускать от имени администратора", hint, |ui| {
+                    let mut on = self.elevated_task;
+                    if toggle(ui, &mut on, p) {
+                        if winapp::set_elevated(on) {
+                            self.elevated_task = on;
+                            if on {
+                                winapp::set_autostart(false);
+                                self.autostart = false;
+                                if !winapp::is_elevated() {
+                                    winapp::restart_elevated();
+                                }
+                            }
+                        }
                     }
                 });
             });

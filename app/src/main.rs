@@ -19,6 +19,10 @@ fn main() -> eframe::Result {
         control::send(t);
         return Ok(());
     }
+    // Если настроен запуск с правами администратора, обычный запуск передаётся задаче.
+    if !winapp::is_elevated() && winapp::elevated_task_exists() && winapp::run_elevated_task() {
+        return Ok(());
+    }
     if !winapp::claim_single_instance() {
         return Ok(());
     }

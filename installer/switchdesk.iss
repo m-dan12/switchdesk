@@ -58,7 +58,7 @@ Name: "{autodesktop}\Switchdesk"; Filename: "{app}\switchdesk.exe"; Tasks: deskt
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "Switchdesk"; Flags: dontcreatekey uninsdeletevalue
 
 [Run]
-Filename: "{app}\switchdesk.exe"; Description: "Запустить Switchdesk"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\switchdesk.exe"; Parameters: "--minimized"; Description: "Запустить Switchdesk"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM switchdesk.exe"; Flags: runhidden; RunOnceId: "StopSwitchdesk"

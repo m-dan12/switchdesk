@@ -56,7 +56,7 @@ impl Updater {
         let st = self.0.clone();
         std::thread::spawn(move || {
             let result = switchdesk_update::download(&rel).and_then(|path| {
-                let relaunch = std::env::current_exe().ok().map(|exe| (exe, Vec::new()));
+                let relaunch = std::env::current_exe().ok().map(|exe| (exe, vec!["--minimized".to_string()]));
                 switchdesk_update::run_installer(&path, relaunch).map_err(|e| e.to_string())
             });
             match result {
