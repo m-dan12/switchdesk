@@ -34,6 +34,17 @@ static SINK: Mutex<Option<Sender<Ev>>> = Mutex::new(None);
 static PRESSED: Mutex<Vec<(u16, bool)>> = Mutex::new(Vec::new());
 
 const VK_F12: u32 = 0x7B;
+const VK_ESC: u32 = 0x1B;
+/// Аварийный выход, если горячая клавиша не срабатывает (например, F12 только через Fn):
+/// пять отдельных нажатий Esc подряд меньше чем за 2 секунды возвращают ввод себе.
+const PANIC_PRESSES: u32 = 5;
+static ESC_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static ESC_LAST_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
 /// Поток с хуками и его сообщение «переставить хуки наверх цепочки».
 static HOOK_TID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 const WM_REHOOK: u32 = WM_APP + 1;
@@ -215,6 +226,9 @@ unsafe extern "system" fn key_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
             0xA4 | 0xA5 | 0x12 => ALT.store(down, SeqCst),
             _ => {}
         }
+        if k.vkCode == VK_F12 && down {
+            log(&format!("F12: ctrl={} alt={} active={}", CTRL.load(SeqCst), ALT.load(SeqCst), ACTIVE.load(SeqCst)));
+        }
         if k.vkCode == VK_F12 {
             if down && CTRL.load(SeqCst) && ALT.load(SeqCst) {
                 // Автоповтор F12 при удержании не должен переключать захват снова.
@@ -238,10 +252,23 @@ unsafe extern "system" fn key_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         let key = (k.scanCode as u16, k.flags.0 & 1 != 0);
         if down {
             let mut p = PRESSED.lock().unwrap();
-            if !p.contains(&key) {
+            let repeat = p.contains(&key);
+            if !repeat {
                 p.push(key);
             }
             drop(p);
+            if k.vkCode == VK_ESC && !repeat {
+                let now = now_ms();
+                let n = if now.saturating_sub(ESC_LAST_MS.load(SeqCst)) < 2000 { ESC_COUNT.load(SeqCst) + 1 } else { 1 };
+                ESC_LAST_MS.store(now, SeqCst);
+                ESC_COUNT.store(n, SeqCst);
+                if n >= PANIC_PRESSES {
+                    ESC_COUNT.store(0, SeqCst);
+                    log("аварийный выход: Esc x5");
+                    toggle();
+                    return LRESULT(1);
+                }
+            }
             trace(k, down, "sent+swallowed");
             emit(Ev::Key { sc: key.0, ext: key.1, down: true });
             return LRESULT(1);
