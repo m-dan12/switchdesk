@@ -25,7 +25,6 @@ pub struct Config {
     pub host_allow_input: bool,
     /// "system" | "light" | "dark"
     pub theme: String,
-    pub close_to_tray: bool,
 }
 
 pub fn new_token() -> String {
@@ -43,7 +42,6 @@ impl Default for Config {
             host_token: new_token(),
             host_allow_input: true,
             theme: "system".into(),
-            close_to_tray: true,
         }
     }
 }

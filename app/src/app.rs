@@ -1,21 +1,15 @@
-use crate::capture;
-use crate::client::{Client, Status};
+use crate::client::Status;
 use crate::config::{self, Config, Device};
-use crate::host::{Host, HostShared};
-use crate::updater::{UpdState, Updater};
+use crate::ipc::{self, Req, State, UpdView};
 use crate::winapp;
 use eframe::egui::{
     self, vec2, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, RichText, Sense, Stroke, Theme,
     ThemePreference, Ui,
 };
-use std::sync::atomic::Ordering::SeqCst;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const VERSION: &str = switchdesk_update::CURRENT;
-const UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
 
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
@@ -176,88 +170,53 @@ pub struct App {
     tab: Tab,
     selected: usize,
     editing: bool,
-    client: Client,
-    host: Option<Host>,
-    host_shared: Arc<HostShared>,
-    host_error: Option<String>,
+    /// Последнее состояние ядра; обновляется потоком опроса.
+    snap: Arc<Mutex<State>>,
     addrs: Vec<String>,
-    updater: Updater,
-    last_update_check: Instant,
     autostart: bool,
-    start_hidden: u8,
     elevated_task: bool,
-    _tray: Option<TrayIcon>,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, tab: Option<&str>) -> App {
         let cfg = Config::load();
-        let client = Client::new();
-        let updater = Updater::new();
-        crate::control::listen(client.clone());
-        let tray = make_tray(&client, &updater);
         cc.egui_ctx.options_mut(|o| o.theme_preference = theme_pref(&cfg.theme));
-        let mut app = App {
+        let snap = Arc::new(Mutex::new(ipc::call(&Req::State).unwrap_or_default()));
+        poll(snap.clone(), cc.egui_ctx.clone());
+        App {
             selected: cfg.last_device,
             editing: false,
-            host_shared: HostShared::new(cfg.host_allow_input),
+            snap,
             tab: match tab {
                 Some("host") => Tab::Host,
                 Some("settings") => Tab::Settings,
                 _ => Tab::Devices,
             },
-            client,
-            host: None,
-            host_error: None,
             addrs: local_addrs(),
-            last_update_check: Instant::now(),
             autostart: winapp::autostart_enabled(),
-            start_hidden: if std::env::args().any(|a| a == "--minimized") && cfg.close_to_tray { 2 } else { 0 },
             elevated_task: winapp::elevated_task_exists(),
-            _tray: tray,
-            updater,
             cfg,
-        };
-        app.updater.check();
-        if app.cfg.host_enabled {
-            app.start_host();
-        }
-        app
-    }
-
-    fn start_host(&mut self) {
-        match Host::start(
-            self.cfg.host_port,
-            self.cfg.host_token.clone(),
-            self.cfg.pc_name.clone(),
-            self.host_shared.clone(),
-        ) {
-            Ok(h) => {
-                self.host = Some(h);
-                self.host_error = None;
-            }
-            Err(e) => {
-                self.host_error = Some(format!("Не удалось открыть порт {}: {e}", self.cfg.host_port));
-                self.cfg.host_enabled = false;
-            }
         }
     }
 
-    fn stop_host(&mut self) {
-        self.host = None; // Drop закрывает все соединения
-        self.host_shared.clients.lock().unwrap().clear();
+    fn state(&self) -> State {
+        self.snap.lock().unwrap().clone()
+    }
+
+    /// Команда ядру; в ответ приходит свежее состояние.
+    fn cmd(&self, req: Req) {
+        if let Ok(s) = ipc::call(&req) {
+            *self.snap.lock().unwrap() = s;
+        }
     }
 
     // ----- шапка -----
 
     fn update_banner(&mut self, ui: &mut Ui, p: Pal) {
-        let st = self.updater.state();
-        let (msg, button, error) = match &st {
-            UpdState::Available(r) => (format!("Доступна версия {} (у вас {VERSION})", r.version), Some("Обновить и перезапустить"), false),
-            UpdState::Downloading(r) => (format!("Скачиваю версию {}…", r.version), None, false),
-            UpdState::Error(e) if self.last_update_check.elapsed() < Duration::from_secs(1) || e.contains("подпис") => {
-                (format!("Обновление не удалось: {e}"), None, true)
-            }
+        let (msg, button, error) = match self.state().update {
+            UpdView::Available(v) => (format!("Доступна версия {v} (у вас {VERSION})"), Some("Обновить и перезапустить"), false),
+            UpdView::Downloading(v) => (format!("Скачиваю версию {v}…"), None, false),
+            UpdView::Error(e) if e.contains("подпис") => (format!("Обновление не удалось: {e}"), None, true),
             _ => return,
         };
         egui::Frame::new().fill(if error { p.bd } else { p.acbg }).inner_margin(Margin::symmetric(14, 8)).show(ui, |ui| {
@@ -266,7 +225,7 @@ impl App {
                 if let Some(b) = button {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.add(primary(p, b)).clicked() {
-                            self.updater.install();
+                            self.cmd(Req::UpdateInstall);
                         }
                     });
                 }
@@ -301,7 +260,8 @@ impl App {
     // ----- вкладка «Устройства» -----
 
     fn devices_tab(&mut self, ui: &mut Ui, p: Pal) {
-        let status = self.client.status();
+        let st = self.state();
+        let status = st.status.clone();
         egui::Panel::left("devices")
             .exact_size(220.0)
             .resizable(false)
@@ -398,7 +358,7 @@ impl App {
                             self.cfg.save();
                         }
                         if ui.button(text("Удалить устройство", p.warn)).clicked() {
-                            self.client.disconnect();
+                            self.cmd(Req::Disconnect);
                             self.cfg.devices.remove(i);
                             self.selected = self.selected.saturating_sub(1);
                             self.editing = false;
@@ -410,7 +370,7 @@ impl App {
 
             let connected = matches!(status, Status::Connected(_));
             if connected {
-                let active = capture::is_active();
+                let active = st.active;
                 let border = if active { p.warn } else { p.bd };
                 card(ui, p, border, |ui| {
                     ui.horizontal(|ui| {
@@ -426,7 +386,7 @@ impl App {
                         if active {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui.button("Вернуть себе").clicked() {
-                                    capture::toggle();
+                                    self.cmd(Req::Toggle);
                                 }
                             });
                         }
@@ -440,14 +400,14 @@ impl App {
                     match &status {
                         Status::Connected(_) | Status::Connecting => {
                             if ui.button("Отключиться").clicked() {
-                                self.client.disconnect();
+                                self.cmd(Req::Disconnect);
                             }
                         }
                         _ => {
                             if ui.add(primary(p, "Подключиться")).clicked() {
                                 self.cfg.last_device = i;
                                 self.cfg.save();
-                                self.client.connect(self.cfg.devices[i].clone(), self.cfg.pc_name.clone());
+                                self.cmd(Req::Connect { dev: self.cfg.devices[i].clone(), me: self.cfg.pc_name.clone() });
                             }
                         }
                     }
@@ -456,9 +416,9 @@ impl App {
                     }
                     if connected {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let label = if capture::is_active() { "Вернуть управление себе" } else { "Управлять этим компьютером" };
+                            let label = if st.active { "Вернуть управление себе" } else { "Управлять этим компьютером" };
                             if ui.add(primary(p, label)).clicked() {
-                                capture::toggle();
+                                self.cmd(Req::Toggle);
                             }
                         });
                     }
@@ -472,7 +432,8 @@ impl App {
     fn host_tab(&mut self, ui: &mut Ui, p: Pal) {
         egui::Frame::new().inner_margin(16).show(ui, |ui| {
             let mut changed = false;
-            let running = self.host.is_some();
+            let st = self.state();
+            let running = st.host_running;
             card(ui, p, p.bd, |ui| {
                 let mut enabled = running;
                 let addrs = self.addrs.join(", ");
@@ -483,26 +444,24 @@ impl App {
                     &format!("Порт {} · адреса: {}", self.cfg.host_port, if addrs.is_empty() { "—".into() } else { addrs }),
                     |ui| {
                         if toggle(ui, &mut enabled, p) {
-                            if enabled {
-                                self.start_host();
-                            } else {
-                                self.stop_host();
-                            }
-                            self.cfg.host_enabled = self.host.is_some();
+                            self.cfg.host_enabled = enabled;
+                            self.cfg.save();
+                            self.cmd(Req::HostApply);
+                            self.cfg.host_enabled = self.state().host_running;
                             changed = true;
                         }
                     },
                 );
-                if let Some(e) = &self.host_error {
+                if let Some(e) = &st.host_error {
                     ui.label(text(e, p.warn).size(12.0));
                 }
                 divider(ui, p);
-                let mut allow = self.host_shared.allow_input.load(SeqCst);
+                let mut allow = self.cfg.host_allow_input;
                 row_setting(ui, p, "Разрешить управление", "Выключите, чтобы мгновенно заморозить ввод", |ui| {
                     if toggle(ui, &mut allow, p) {
-                        self.host_shared.allow_input.store(allow, SeqCst);
                         self.cfg.host_allow_input = allow;
-                        changed = true;
+                        self.cfg.save();
+                        self.cmd(Req::HostApply);
                     }
                 });
                 divider(ui, p);
@@ -528,7 +487,7 @@ impl App {
             });
             card(ui, p, p.bd, |ui| {
                 ui.label(text("Подключены сейчас", p.tx).strong());
-                let clients = self.host_shared.clients.lock().unwrap().clone();
+                let clients = st.clients.clone();
                 if clients.is_empty() {
                     ui.label(text("Никого", p.tx2));
                 }
@@ -537,7 +496,7 @@ impl App {
                         let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
                         ui.painter().circle_filled(r.center(), 4.0, p.ok);
                         ui.label(text(&cl.name, p.tx));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(text(cl.addr.ip().to_string(), p.tx2)));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(text(&cl.ip, p.tx2)));
                     });
                 }
             });
@@ -567,11 +526,7 @@ impl App {
                     }
                 });
                 divider(ui, p);
-                row_setting(ui, p, "Сворачивать в трей при закрытии", "Окно скрывается, программа продолжает работать", |ui| {
-                    changed |= toggle(ui, &mut self.cfg.close_to_tray, p);
-                });
-                divider(ui, p);
-                row_setting(ui, p, "Запускать при входе в Windows", "Сразу в трей", |ui| {
+                row_setting(ui, p, "Запускать при входе в Windows", "Фоновая часть стартует без окна", |ui| {
                     let mut on = self.autostart;
                     if toggle(ui, &mut on, p) {
                         winapp::set_autostart(on);
@@ -579,7 +534,8 @@ impl App {
                     }
                 });
                 divider(ui, p);
-                let hint = if winapp::is_elevated() {
+                let st = self.state();
+                let hint = if st.elevated {
                     "Запущено с правами администратора: диспетчер задач и игры управляются"
                 } else {
                     "Нужно для диспетчера задач и игр с повышенными правами. Запрос UAC один раз"
@@ -592,8 +548,8 @@ impl App {
                             if on {
                                 winapp::set_autostart(false);
                                 self.autostart = false;
-                                if !winapp::is_elevated() {
-                                    winapp::restart_elevated();
+                                if !st.elevated {
+                                    let _ = ipc::call(&Req::RestartElevated);
                                 }
                             }
                         }
@@ -601,27 +557,26 @@ impl App {
                 });
             });
             card(ui, p, p.bd, |ui| {
-                let st = self.updater.state();
+                let st = self.state().update;
                 let hint = match &st {
-                    UpdState::Idle => "Ещё не проверялось".to_string(),
-                    UpdState::Checking => "Проверяю…".to_string(),
-                    UpdState::UpToDate => format!("Установлена последняя версия ({VERSION})"),
-                    UpdState::Available(r) => format!("Доступна версия {}", r.version),
-                    UpdState::Downloading(r) => format!("Скачиваю версию {}…", r.version),
-                    UpdState::Error(e) => e.clone(),
+                    UpdView::Idle => "Ещё не проверялось".to_string(),
+                    UpdView::Checking => "Проверяю…".to_string(),
+                    UpdView::UpToDate => format!("Установлена последняя версия ({VERSION})"),
+                    UpdView::Available(v) => format!("Доступна версия {v}"),
+                    UpdView::Downloading(v) => format!("Скачиваю версию {v}…"),
+                    UpdView::Error(e) => e.clone(),
                 };
                 row_setting(ui, p, "Обновления", &hint, |ui| {
                     match &st {
-                        UpdState::Available(_) => {
+                        UpdView::Available(_) => {
                             if ui.add(primary(p, "Обновить и перезапустить")).clicked() {
-                                self.updater.install();
+                                self.cmd(Req::UpdateInstall);
                             }
                         }
-                        UpdState::Checking | UpdState::Downloading(_) => {}
+                        UpdView::Checking | UpdView::Downloading(_) => {}
                         _ => {
                             if ui.button("Проверить сейчас").clicked() {
-                                self.updater.check();
-                                self.last_update_check = Instant::now();
+                                self.cmd(Req::UpdateCheck);
                             }
                         }
                     }
@@ -648,24 +603,6 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         ctx.request_repaint_after(Duration::from_millis(250));
-        // eframe показывает окно после первого кадра: при старте в трее оно за краем экрана.
-        // eframe сам показывает окно после первого кадра, поэтому прячем со второго.
-        if self.start_hidden > 0 && self._tray.is_some() {
-            self.start_hidden -= 1;
-            if self.start_hidden == 0 {
-                winapp::hide_window();
-            }
-            return;
-        }
-        self.start_hidden = 0;
-        if self.last_update_check.elapsed() > UPDATE_EVERY {
-            self.last_update_check = Instant::now();
-            self.updater.check();
-        }
-        if ctx.input(|i| i.viewport().close_requested()) && self.cfg.close_to_tray && self._tray.is_some() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            winapp::hide_window();
-        }
         let dark = ctx.theme() == Theme::Dark;
         let p = pal(dark);
         apply_theme(&ctx, p, dark);
@@ -683,48 +620,35 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
-        capture::set_sink(None);
         self.cfg.last_device = self.selected;
         self.cfg.save();
     }
 }
 
-/// Значок в трее: левый клик открывает окно, меню — быстрые действия.
-fn make_tray(client: &Client, updater: &Updater) -> Option<TrayIcon> {
-    let menu = Menu::new();
-    let open = MenuItem::new("Открыть SwitchDesk", true, None);
-    let release = MenuItem::new("Вернуть управление себе", true, None);
-    let disconnect = MenuItem::new("Отключиться", true, None);
-    let update = MenuItem::new("Проверить обновления", true, None);
-    let quit = MenuItem::new("Выход", true, None);
-    menu.append_items(&[&open, &release, &disconnect, &update, &PredefinedMenuItem::separator(), &quit]).ok()?;
-    let (open_id, release_id, disconnect_id, update_id, quit_id) =
-        (open.id().clone(), release.id().clone(), disconnect.id().clone(), update.id().clone(), quit.id().clone());
-    let (client, updater) = (client.clone(), updater.clone());
-    MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
-        if e.id == open_id {
-            winapp::show_window();
-        } else if e.id == release_id {
-            if capture::is_active() {
-                capture::toggle();
+/// Опрашивает ядро; если оно пропало надолго (выход из трея), закрывает и окно.
+fn poll(snap: Arc<Mutex<State>>, ctx: egui::Context) {
+    std::thread::spawn(move || {
+        let mut fails = 0;
+        loop {
+            std::thread::sleep(Duration::from_millis(300));
+            match ipc::call(&Req::State) {
+                Ok(s) => {
+                    fails = 0;
+                    let mut g = snap.lock().unwrap();
+                    if *g != s {
+                        *g = s;
+                        ctx.request_repaint();
+                    }
+                }
+                Err(_) => {
+                    fails += 1;
+                    if fails > 50 {
+                        std::process::exit(0);
+                    }
+                }
             }
-        } else if e.id == disconnect_id {
-            client.disconnect();
-        } else if e.id == update_id {
-            updater.check();
-            winapp::show_window();
-        } else if e.id == quit_id {
-            capture::set_sink(None);
-            std::process::exit(0);
         }
-    }));
-    TrayIconEvent::set_event_handler(Some(|e: TrayIconEvent| {
-        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
-            winapp::show_window();
-        }
-    }));
-    let icon = Icon::from_resource(1, Some((32, 32))).ok()?;
-    TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("SwitchDesk").with_icon(icon).build().ok()
+    });
 }
 
 /// Адреса этого компьютера: LAN и Tailscale (100.64.0.0/10). Виртуальные адаптеры VPN/VM пропускаются.

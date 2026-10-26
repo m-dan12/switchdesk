@@ -15,8 +15,9 @@ use std::time::Duration;
 /// Как часто пустой пакет проверяет, что фоновое соединение живо.
 const PING_EVERY: Duration = Duration::from_secs(5);
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum Status {
+    #[default]
     Idle,
     Connecting,
     Connected(String),

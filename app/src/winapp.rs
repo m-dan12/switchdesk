@@ -6,9 +6,7 @@ use windows::Win32::System::Registry::{
     RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
-};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW};
 
 /// Не даёт Windows 11 переводить скрытое окно в режим эффективности (EcoQoS): в нём потоки
 /// просыпаются с задержкой, и мышь через сеть подлагивает. Заодно чуть повышает приоритет процесса.
@@ -33,22 +31,48 @@ pub fn disable_throttling() {
 pub const WINDOW_TITLE: &str = "SwitchDesk";
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const RUN_VALUE: PCWSTR = w!("SwitchDesk");
+const CORE_MUTEX: PCWSTR = w!(r"Local\SwitchDeskCore");
+const GUI_MUTEX: PCWSTR = w!(r"Local\SwitchDeskGui");
 
-/// true, если это первый экземпляр. Иначе показывает окно уже запущенного.
-pub fn claim_single_instance() -> bool {
+/// true, если мьютекс был свободен и теперь наш (дескриптор живёт до конца процесса).
+fn claim(name: PCWSTR) -> bool {
     unsafe {
-        match CreateMutexW(None, true, w!(r"Local\SwitchDeskSingleInstance")) {
-            Ok(h) => {
-                let exists = GetLastError() == ERROR_ALREADY_EXISTS;
-                let _ = h; // дескриптор живёт до конца процесса
-                if exists {
-                    show_window();
-                }
-                !exists
-            }
+        match CreateMutexW(None, true, name) {
+            Ok(_) => GetLastError() != ERROR_ALREADY_EXISTS,
             Err(_) => true,
         }
     }
+}
+
+fn exists(name: PCWSTR) -> bool {
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+    unsafe {
+        match OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, name) {
+            Ok(h) => {
+                let _ = windows::Win32::Foundation::CloseHandle(h);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+pub fn core_running() -> bool {
+    exists(CORE_MUTEX)
+}
+
+/// true, если это первое ядро.
+pub fn claim_core() -> bool {
+    claim(CORE_MUTEX)
+}
+
+/// true, если это первое окно; иначе показывает уже открытое.
+pub fn claim_gui() -> bool {
+    let first = claim(GUI_MUTEX);
+    if !first {
+        show_window();
+    }
+    first
 }
 
 fn find_window() -> Option<HWND> {
@@ -57,26 +81,8 @@ fn find_window() -> Option<HWND> {
 }
 
 pub fn show_window() {
-    use windows::Win32::UI::HiDpi::GetDpiForWindow;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, GetWindowPlacement, SetWindowPlacement, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL,
-        WINDOWPLACEMENT,
-    };
     if let Some(h) = find_window() {
         unsafe {
-            // Старт в трее: окно создано за краем экрана, при первом показе ставим его по центру.
-            let mut pl = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
-            if GetWindowPlacement(h, &mut pl).is_ok() && pl.rcNormalPosition.left < -10000 {
-                let k = GetDpiForWindow(h).max(96) as f64 / 96.0;
-                let (w, hh) = ((820.0 * k) as i32, (520.0 * k) as i32);
-                let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
-                pl.rcNormalPosition.left = (sw - w) / 2;
-                pl.rcNormalPosition.top = (sh - hh) / 2;
-                pl.rcNormalPosition.right = pl.rcNormalPosition.left + w;
-                pl.rcNormalPosition.bottom = pl.rcNormalPosition.top + hh;
-                pl.showCmd = SW_SHOWNORMAL.0 as u32;
-                let _ = SetWindowPlacement(h, &pl);
-            }
             let _ = ShowWindow(h, SW_SHOW);
             let _ = ShowWindow(h, SW_RESTORE);
             let _ = SetForegroundWindow(h);
@@ -84,11 +90,12 @@ pub fn show_window() {
     }
 }
 
-pub fn hide_window() {
-    if let Some(h) = find_window() {
-        unsafe {
-            let _ = ShowWindow(h, SW_HIDE);
-        }
+/// Открывает окно: выводит на передний план уже открытое или запускает `--gui`.
+pub fn open_gui() {
+    if exists(GUI_MUTEX) {
+        show_window();
+    } else if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).arg("--gui").spawn();
     }
 }
 
