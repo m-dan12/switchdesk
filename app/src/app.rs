@@ -184,13 +184,13 @@ pub struct App {
     updater: Updater,
     last_update_check: Instant,
     autostart: bool,
+    start_hidden: u8,
     elevated_task: bool,
-    start_hidden: bool,
     _tray: Option<TrayIcon>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, minimized: bool, tab: Option<&str>) -> App {
+    pub fn new(cc: &eframe::CreationContext<'_>, tab: Option<&str>) -> App {
         let cfg = Config::load();
         let client = Client::new();
         let updater = Updater::new();
@@ -212,8 +212,8 @@ impl App {
             addrs: local_addrs(),
             last_update_check: Instant::now(),
             autostart: winapp::autostart_enabled(),
+            start_hidden: if std::env::args().any(|a| a == "--minimized") && cfg.close_to_tray { 2 } else { 0 },
             elevated_task: winapp::elevated_task_exists(),
-            start_hidden: minimized && tray.is_some() && cfg.close_to_tray,
             _tray: tray,
             updater,
             cfg,
@@ -648,10 +648,16 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         ctx.request_repaint_after(Duration::from_millis(250));
-        if self.start_hidden {
-            self.start_hidden = false;
-            winapp::hide_window();
+        // eframe показывает окно после первого кадра: при старте в трее оно за краем экрана.
+        // eframe сам показывает окно после первого кадра, поэтому прячем со второго.
+        if self.start_hidden > 0 && self._tray.is_some() {
+            self.start_hidden -= 1;
+            if self.start_hidden == 0 {
+                winapp::hide_window();
+            }
+            return;
         }
+        self.start_hidden = 0;
         if self.last_update_check.elapsed() > UPDATE_EVERY {
             self.last_update_check = Instant::now();
             self.updater.check();

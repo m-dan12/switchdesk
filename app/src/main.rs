@@ -31,8 +31,11 @@ fn main() -> eframe::Result {
     let tab = args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).cloned();
     winapp::disable_throttling();
     capture::start();
+    // Запуск в трее: окно сразу создаётся скрытым, без мигания.
+    let hidden = minimized && config::Config::load().close_to_tray;
     let opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
+            .with_position(if hidden { [-32000.0, -32000.0] } else { [100.0, 100.0] })
             .with_title(winapp::WINDOW_TITLE)
             .with_inner_size([820.0, 520.0])
             .with_min_inner_size([680.0, 440.0]),
@@ -41,6 +44,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         winapp::WINDOW_TITLE,
         opts,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, minimized, tab.as_deref())))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, tab.as_deref())))),
     )
 }

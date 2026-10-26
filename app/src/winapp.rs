@@ -57,8 +57,26 @@ fn find_window() -> Option<HWND> {
 }
 
 pub fn show_window() {
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, GetWindowPlacement, SetWindowPlacement, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNORMAL,
+        WINDOWPLACEMENT,
+    };
     if let Some(h) = find_window() {
         unsafe {
+            // Старт в трее: окно создано за краем экрана, при первом показе ставим его по центру.
+            let mut pl = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+            if GetWindowPlacement(h, &mut pl).is_ok() && pl.rcNormalPosition.left < -10000 {
+                let k = GetDpiForWindow(h).max(96) as f64 / 96.0;
+                let (w, hh) = ((820.0 * k) as i32, (520.0 * k) as i32);
+                let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+                pl.rcNormalPosition.left = (sw - w) / 2;
+                pl.rcNormalPosition.top = (sh - hh) / 2;
+                pl.rcNormalPosition.right = pl.rcNormalPosition.left + w;
+                pl.rcNormalPosition.bottom = pl.rcNormalPosition.top + hh;
+                pl.showCmd = SW_SHOWNORMAL.0 as u32;
+                let _ = SetWindowPlacement(h, &pl);
+            }
             let _ = ShowWindow(h, SW_SHOW);
             let _ = ShowWindow(h, SW_RESTORE);
             let _ = SetForegroundWindow(h);
